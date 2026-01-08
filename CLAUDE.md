@@ -66,3 +66,16 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 ```
 
 Restart Claude Desktop after saving.
+
+## Available Skills
+
+Use these slash commands for specialized assistance:
+
+| Skill | Description |
+|-------|-------------|
+| `/mcp-expert` | **Recommended** - Expert in MCP server development, tool design, debugging, and deployment |
+| `/document-commit` | Commit and push changes with clear messages |
+| `/security-expert` | Security hardening and vulnerability scanning |
+| `/langchain-expert` | LangChain/LangGraph integration if adding AI features |
+| `/opensearch-expert` | OpenSearch integration if adding search backend |
+| `/web-designer` | UI design if adding a web interface
