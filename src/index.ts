@@ -24,6 +24,23 @@ interface InferredMetadata {
   date?: string;
 }
 
+// Types for dynamic vault info
+interface VaultStats {
+  totalNotes: number;
+  folders: Map<string, number>;
+  tags: Map<string, number>;
+  properties: Set<string>;
+}
+
+// Types for todo items
+interface TodoItem {
+  id: number;
+  text: string;
+  completed: boolean;
+  tags: string[];
+  line: number;
+}
+
 // Vault enrichment helper functions
 function inferMetadataFromPath(filePath: string, fileName: string): InferredMetadata {
   const metadata: InferredMetadata = {
@@ -177,6 +194,96 @@ function fixMalformedDate(date: string, fileName: string): string {
     }
   }
   return date;
+}
+
+// Dynamic vault scanning function
+async function scanVault(vaultPath: string): Promise<VaultStats> {
+  const stats: VaultStats = {
+    totalNotes: 0,
+    folders: new Map<string, number>(),
+    tags: new Map<string, number>(),
+    properties: new Set<string>(),
+  };
+
+  async function scanDir(dir: string, depth: number = 0): Promise<void> {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+
+      const fullPath = path.join(dir, entry.name);
+      const relativePath = path.relative(vaultPath, fullPath);
+
+      if (entry.isDirectory()) {
+        // Track folder at first two levels
+        if (depth < 2) {
+          stats.folders.set(relativePath, 0);
+        }
+        await scanDir(fullPath, depth + 1);
+      } else if (entry.name.endsWith('.md')) {
+        stats.totalNotes++;
+
+        // Count notes per folder (top level)
+        const topFolder = relativePath.split(path.sep)[0];
+        stats.folders.set(topFolder, (stats.folders.get(topFolder) || 0) + 1);
+
+        // Parse frontmatter for tags and properties
+        try {
+          const content = await fs.readFile(fullPath, 'utf-8');
+          const parsed = parseFrontmatter(content);
+          if (parsed?.frontmatter) {
+            // Track properties used
+            Object.keys(parsed.frontmatter).forEach(key => stats.properties.add(key));
+
+            // Count tags
+            const tags = parsed.frontmatter.tags;
+            if (Array.isArray(tags)) {
+              tags.forEach((tag: string) => {
+                stats.tags.set(tag, (stats.tags.get(tag) || 0) + 1);
+              });
+            }
+          }
+        } catch {
+          // Skip files that can't be read
+        }
+      }
+    }
+  }
+
+  await scanDir(vaultPath, 0);
+  return stats;
+}
+
+// Parse TODO.md into structured items
+function parseTodos(content: string): TodoItem[] {
+  const todos: TodoItem[] = [];
+  const lines = content.split('\n');
+
+  lines.forEach((line, index) => {
+    // Match: - [ ] or - [x] followed by optional tags and text
+    const match = line.match(/^-\s*\[([ xX])\]\s*(.*)$/);
+    if (match) {
+      const completed = match[1].toLowerCase() === 'x';
+      const rest = match[2];
+
+      // Extract tags (words starting with #)
+      const tagMatches = rest.match(/#\w+/g) || [];
+      const tags = tagMatches.map(t => t.substring(1)); // Remove # prefix
+
+      // Get text without tags
+      const text = rest.replace(/#\w+\s*/g, '').trim();
+
+      todos.push({
+        id: todos.length + 1,
+        text,
+        completed,
+        tags,
+        line: index + 1, // 1-indexed line number
+      });
+    }
+  });
+
+  return todos;
 }
 
 // Initialize MCP server
@@ -440,10 +547,10 @@ server.tool(
   }
 );
 
-// Tool: get_vault_info
+// Tool: get_vault_info (dynamic scanning)
 server.tool(
   "get_vault_info",
-  "Get information about the vault structure, available tags, property schema, and organizational system",
+  "Get real-time information about the vault structure, available tags, properties, and statistics by scanning the actual vault",
   {
     section: z.enum(["all", "tags", "properties", "folders", "stats"]).optional()
       .describe("Which section to return (defaults to 'all')")
@@ -451,86 +558,87 @@ server.tool(
   async ({ section }) => {
     try {
       const infoSection = section || "all";
+      const searchPath = path.join(VAULT_PATH, "KMW");
 
-      const vaultInfo = {
-        vault_structure: {
-          root: path.join(VAULT_PATH, "KMW"),
-          main_folders: ["Customers", "Lucille", "Inbox", "Archive", "Blog"],
-          customer_folders: {
-            "Customers/Gartner": ["Documentation", "Standups", "Configs and Keys", "Governance", "Technical"],
-            "Customers/Nasuni": ["Weekly Insights Project", "Hyrule Project"],
-            "Customers/ThermoFisher": ["Research", "Standups", "Working Sessions", "Governance", "Code references and definitions", "Configs and Keys", "Repos and APIs"]
-          },
-          total_notes: 142
-        },
-        property_schema: {
-          title: "string (required) - Note title",
-          date: "YYYY-MM-DD format",
-          customer: "gartner | nasuni | thermofisher (optional)",
-          project: "hyrule | lucille | weekly-insights (optional)",
-          type: "standup | documentation | research | governance | config | working-session | technical | code-reference",
-          status: "active | archived | completed (default: active)",
-          tags: "array of strings (see available_tags)"
-        },
-        available_tags: {
-          customer: ["gartner (10 notes)", "nasuni (35 notes)", "thermofisher (79 notes)"],
-          project: ["hyrule (34 notes)", "lucille (48 notes)"],
-          type: ["standup (36)", "working-session (24)", "config (17)", "docs (13)", "governance (12)", "research (6)", "technical (4)"],
-          technology: ["opensearch (30)", "aws (33)", "kubernetes (22)", "java (31)", "python (17)", "docker (9)"],
-          features: ["hybrid-search (18)", "relevancy (9)", "ltr", "search-features", "architecture (32)", "security (26)"]
-        },
-        common_tag_patterns: {
-          gartner_work: "tags: [gartner, opensearch, hybrid-search, relevancy, ltr, technical]",
-          nasuni_hyrule: "tags: [nasuni, hyrule, aws, kubernetes, architecture, docker]",
-          thermofisher_standup: "tags: [thermofisher, standup, java, architecture]",
-          lucille_project: "tags: [lucille, opensearch, java, python]"
-        }
-      };
+      // Scan the vault dynamically
+      const stats = await scanVault(searchPath);
 
       let responseText = "";
 
       if (infoSection === "all" || infoSection === "folders") {
         responseText += "## Vault Structure\n\n";
-        responseText += `Root: ${vaultInfo.vault_structure.root}\n`;
-        responseText += `Total Notes: ${vaultInfo.vault_structure.total_notes}\n\n`;
-        responseText += "**Main Folders:**\n";
-        responseText += vaultInfo.vault_structure.main_folders.map(f => `- ${f}`).join("\n");
-        responseText += "\n\n**Customer Folders:**\n";
-        Object.entries(vaultInfo.vault_structure.customer_folders).forEach(([customer, subfolders]) => {
-          responseText += `\n**${customer}:**\n`;
-          responseText += (subfolders as string[]).map(s => `  - ${s}`).join("\n") + "\n";
+        responseText += `Root: ${searchPath}\n`;
+        responseText += `Total Notes: ${stats.totalNotes}\n\n`;
+
+        responseText += "**Folders (with note counts):**\n";
+        const sortedFolders = Array.from(stats.folders.entries())
+          .filter(([_, count]) => count > 0)
+          .sort((a, b) => b[1] - a[1]);
+        sortedFolders.forEach(([folder, count]) => {
+          responseText += `- ${folder}: ${count} notes\n`;
         });
         responseText += "\n";
       }
 
       if (infoSection === "all" || infoSection === "properties") {
-        responseText += "## Property Schema\n\n";
-        Object.entries(vaultInfo.property_schema).forEach(([prop, desc]) => {
-          responseText += `- **${prop}**: ${desc}\n`;
+        responseText += "## Properties Used\n\n";
+        const sortedProps = Array.from(stats.properties).sort();
+        sortedProps.forEach(prop => {
+          responseText += `- ${prop}\n`;
         });
         responseText += "\n";
       }
 
       if (infoSection === "all" || infoSection === "tags") {
-        responseText += "## Available Tags\n\n";
-        Object.entries(vaultInfo.available_tags).forEach(([category, tags]) => {
-          responseText += `**${category.charAt(0).toUpperCase() + category.slice(1)} Tags:**\n`;
-          responseText += (tags as string[]).map(t => `- ${t}`).join("\n") + "\n\n";
-        });
+        responseText += "## Tags (by frequency)\n\n";
+        const sortedTags = Array.from(stats.tags.entries())
+          .sort((a, b) => b[1] - a[1]);
 
-        responseText += "## Common Tag Patterns\n\n";
-        Object.entries(vaultInfo.common_tag_patterns).forEach(([name, pattern]) => {
-          responseText += `- **${name.replace(/_/g, " ")}**: \`${pattern}\`\n`;
-        });
-        responseText += "\n";
+        // Group by count ranges
+        const highFreq = sortedTags.filter(([_, c]) => c >= 20);
+        const medFreq = sortedTags.filter(([_, c]) => c >= 5 && c < 20);
+        const lowFreq = sortedTags.filter(([_, c]) => c < 5);
+
+        if (highFreq.length > 0) {
+          responseText += "**High frequency (20+):**\n";
+          highFreq.forEach(([tag, count]) => {
+            responseText += `- ${tag} (${count})\n`;
+          });
+          responseText += "\n";
+        }
+
+        if (medFreq.length > 0) {
+          responseText += "**Medium frequency (5-19):**\n";
+          medFreq.forEach(([tag, count]) => {
+            responseText += `- ${tag} (${count})\n`;
+          });
+          responseText += "\n";
+        }
+
+        if (lowFreq.length > 0) {
+          responseText += "**Low frequency (<5):**\n";
+          lowFreq.forEach(([tag, count]) => {
+            responseText += `- ${tag} (${count})\n`;
+          });
+          responseText += "\n";
+        }
       }
 
       if (infoSection === "stats") {
         responseText += "## Vault Statistics\n\n";
-        responseText += `- Total notes: ${vaultInfo.vault_structure.total_notes}\n`;
-        responseText += `- Fully tagged notes: 142 (100%)\n`;
-        responseText += `- Customer breakdown: Gartner (10), Nasuni (35), ThermoFisher (79)\n`;
-        responseText += `- Project breakdown: Hyrule (34), Lucille (48)\n`;
+        responseText += `- Total notes: ${stats.totalNotes}\n`;
+        responseText += `- Unique tags: ${stats.tags.size}\n`;
+        responseText += `- Properties tracked: ${stats.properties.size}\n`;
+        responseText += `- Top-level folders: ${stats.folders.size}\n`;
+
+        // Top 5 tags
+        const topTags = Array.from(stats.tags.entries())
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 5);
+        responseText += `\n**Top 5 Tags:**\n`;
+        topTags.forEach(([tag, count]) => {
+          responseText += `- ${tag}: ${count} notes\n`;
+        });
       }
 
       return {
@@ -654,6 +762,296 @@ server.tool(
           text: `Error enriching vault: ${error instanceof Error ? error.message : "Unknown error"}`
         }],
         isError: true
+      };
+    }
+  }
+);
+
+// Tool: get_note
+server.tool(
+  "get_note",
+  "Read a specific note from the vault, returning its content, frontmatter, and metadata",
+  {
+    path: z.string().min(1).describe("Relative path to the note within KMW folder (e.g., 'Inbox/my-note.md' or 'Customers/Gartner/Technical/config.md')"),
+  },
+  async ({ path: notePath }) => {
+    try {
+      const searchPath = path.join(VAULT_PATH, "KMW");
+      const fullPath = path.join(searchPath, notePath);
+
+      // Validate path stays within vault
+      const resolvedPath = path.resolve(fullPath);
+      if (!resolvedPath.startsWith(path.resolve(searchPath))) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Error: Path must be within the vault",
+          }],
+          isError: true,
+        };
+      }
+
+      // Read file
+      const content = await fs.readFile(fullPath, 'utf-8');
+      const parsed = parseFrontmatter(content);
+
+      // Get file stats
+      const stats = await fs.stat(fullPath);
+
+      let responseText = `## ${notePath}\n\n`;
+
+      if (parsed?.frontmatter) {
+        responseText += "### Frontmatter\n\n```yaml\n";
+        responseText += yaml.dump(parsed.frontmatter, { sortKeys: true });
+        responseText += "```\n\n";
+        responseText += "### Content\n\n";
+        responseText += parsed.body;
+      } else {
+        responseText += "### Content\n\n";
+        responseText += content;
+      }
+
+      responseText += `\n\n---\n*Modified: ${stats.mtime.toISOString()}*`;
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: responseText
+        }]
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      if (message.includes('ENOENT')) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Note not found: ${notePath}\n\nUse search_notes to find available notes.`,
+          }],
+          isError: true,
+        };
+      }
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error reading note: ${message}`,
+        }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool: list_todos
+server.tool(
+  "list_todos",
+  "List all todo items from TODO.md with their status, tags, and IDs for use with complete_todo",
+  {
+    filter: z.enum(["all", "pending", "completed"]).optional()
+      .describe("Filter todos by status (defaults to 'all')"),
+    tag: z.string().optional()
+      .describe("Filter by tag (without # prefix, e.g., 'backlog')"),
+  },
+  async ({ filter, tag }) => {
+    try {
+      const filterStatus = filter || "all";
+
+      let content = "";
+      try {
+        content = await fs.readFile(TODO_FILE, "utf-8");
+      } catch {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "No TODO.md file found. Use add_todo to create your first todo.",
+          }]
+        };
+      }
+
+      let todos = parseTodos(content);
+
+      // Apply filters
+      if (filterStatus === "pending") {
+        todos = todos.filter(t => !t.completed);
+      } else if (filterStatus === "completed") {
+        todos = todos.filter(t => t.completed);
+      }
+
+      if (tag) {
+        todos = todos.filter(t => t.tags.includes(tag));
+      }
+
+      if (todos.length === 0) {
+        let message = "No todos found";
+        if (filterStatus !== "all" || tag) {
+          message += ` matching filter: status=${filterStatus}`;
+          if (tag) message += `, tag=${tag}`;
+        }
+        return {
+          content: [{
+            type: "text" as const,
+            text: message,
+          }]
+        };
+      }
+
+      // Format output
+      const pending = todos.filter(t => !t.completed);
+      const completed = todos.filter(t => t.completed);
+
+      let responseText = `## Todos (${todos.length} total)\n\n`;
+
+      if (pending.length > 0 && filterStatus !== "completed") {
+        responseText += `### Pending (${pending.length})\n\n`;
+        pending.forEach(todo => {
+          const tagStr = todo.tags.length > 0 ? ` [${todo.tags.map(t => `#${t}`).join(' ')}]` : '';
+          responseText += `${todo.id}. [ ] ${todo.text}${tagStr}\n`;
+        });
+        responseText += "\n";
+      }
+
+      if (completed.length > 0 && filterStatus !== "pending") {
+        responseText += `### Completed (${completed.length})\n\n`;
+        completed.forEach(todo => {
+          const tagStr = todo.tags.length > 0 ? ` [${todo.tags.map(t => `#${t}`).join(' ')}]` : '';
+          responseText += `${todo.id}. [x] ${todo.text}${tagStr}\n`;
+        });
+      }
+
+      responseText += `\n*Use complete_todo with the ID number to mark a todo as done.*`;
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: responseText.trim()
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error listing todos: ${error instanceof Error ? error.message : "Unknown error"}`,
+        }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool: complete_todo
+server.tool(
+  "complete_todo",
+  "Mark a todo item as completed by its ID (from list_todos) or by matching text",
+  {
+    id: z.number().int().positive().optional()
+      .describe("The todo ID from list_todos"),
+    text: z.string().optional()
+      .describe("Partial text match to find the todo (case-insensitive)"),
+  },
+  async ({ id, text }) => {
+    try {
+      if (!id && !text) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Error: Provide either 'id' or 'text' to identify the todo to complete",
+          }],
+          isError: true,
+        };
+      }
+
+      let content = "";
+      try {
+        content = await fs.readFile(TODO_FILE, "utf-8");
+      } catch {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "No TODO.md file found.",
+          }],
+          isError: true,
+        };
+      }
+
+      const todos = parseTodos(content);
+      let targetTodo: TodoItem | undefined;
+
+      if (id) {
+        targetTodo = todos.find(t => t.id === id);
+        if (!targetTodo) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: `No todo found with ID ${id}. Use list_todos to see available todos.`,
+            }],
+            isError: true,
+          };
+        }
+      } else if (text) {
+        const textLower = text.toLowerCase();
+        const matches = todos.filter(t => t.text.toLowerCase().includes(textLower));
+        if (matches.length === 0) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: `No todo found matching "${text}". Use list_todos to see available todos.`,
+            }],
+            isError: true,
+          };
+        }
+        if (matches.length > 1) {
+          const matchList = matches.map(t => `${t.id}. ${t.text}`).join('\n');
+          return {
+            content: [{
+              type: "text" as const,
+              text: `Multiple todos match "${text}":\n\n${matchList}\n\nUse the specific ID to complete one.`,
+            }],
+            isError: true,
+          };
+        }
+        targetTodo = matches[0];
+      }
+
+      if (!targetTodo) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Could not find the specified todo.",
+          }],
+          isError: true,
+        };
+      }
+
+      if (targetTodo.completed) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Todo is already completed: "${targetTodo.text}"`,
+          }]
+        };
+      }
+
+      // Update the file
+      const lines = content.split('\n');
+      const lineIndex = targetTodo.line - 1; // Convert to 0-indexed
+
+      // Replace [ ] with [x]
+      lines[lineIndex] = lines[lineIndex].replace(/\[\s\]/, '[x]');
+
+      await fs.writeFile(TODO_FILE, lines.join('\n'), 'utf-8');
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Completed todo #${targetTodo.id}: "${targetTodo.text}"`,
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error completing todo: ${error instanceof Error ? error.message : "Unknown error"}`,
+        }],
+        isError: true,
       };
     }
   }

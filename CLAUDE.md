@@ -27,9 +27,12 @@ Single TypeScript file MCP server (`src/index.ts`) using:
 | Tool | Description |
 |------|-------------|
 | `add_todo` | Append todo to `KMW/TODO.md` with optional tags |
+| `list_todos` | List all todos with status, tags, and IDs (filter by status/tag) |
+| `complete_todo` | Mark a todo as completed by ID or text match |
 | `create_note` | Create note with frontmatter in vault (folder, properties, tags) |
+| `get_note` | Read a specific note's content, frontmatter, and metadata |
 | `search_notes` | Search vault content, filenames, and tags |
-| `get_vault_info` | Get vault structure, tags, properties, and statistics |
+| `get_vault_info` | Get real-time vault structure, tags, properties (dynamic scanning) |
 | `enrich_vault` | Enrich all notes with intelligent frontmatter and tags |
 
 ## Configuration
