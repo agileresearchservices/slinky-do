@@ -1057,6 +1057,500 @@ server.tool(
   }
 );
 
+// Tool: update_note
+server.tool(
+  "update_note",
+  "Update an existing note's content, frontmatter properties, or tags. Can replace content, append to it, or just update metadata.",
+  {
+    path: z.string().min(1).describe("Relative path to the note within KMW folder"),
+    content: z.string().optional().describe("New content to replace the note body (preserves frontmatter)"),
+    append: z.string().optional().describe("Content to append to the note"),
+    tags: z.array(z.string()).optional().describe("Tags to merge with existing tags"),
+    properties: z.record(z.string(), z.any()).optional().describe("Properties to merge into frontmatter (e.g., {status: 'completed', project: 'hyrule'})"),
+  },
+  async ({ path: notePath, content: newContent, append, tags, properties }) => {
+    try {
+      const searchPath = path.join(VAULT_PATH, "KMW");
+      const fullPath = path.join(searchPath, notePath);
+
+      // Validate path stays within vault
+      const resolvedPath = path.resolve(fullPath);
+      if (!resolvedPath.startsWith(path.resolve(searchPath))) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Error: Path must be within the vault",
+          }],
+          isError: true,
+        };
+      }
+
+      // Read existing file
+      let fileContent: string;
+      try {
+        fileContent = await fs.readFile(fullPath, 'utf-8');
+      } catch {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Note not found: ${notePath}`,
+          }],
+          isError: true,
+        };
+      }
+
+      const parsed = parseFrontmatter(fileContent);
+      let frontmatter = parsed?.frontmatter || {};
+      let body = parsed?.body || fileContent;
+
+      const changes: string[] = [];
+
+      // Update content if provided
+      if (newContent !== undefined) {
+        body = newContent;
+        changes.push("replaced content");
+      }
+
+      // Append content if provided
+      if (append) {
+        body = body.trimEnd() + "\n\n" + append;
+        changes.push("appended content");
+      }
+
+      // Merge tags if provided
+      if (tags && tags.length > 0) {
+        const existingTags = new Set(frontmatter.tags || []);
+        tags.forEach(t => existingTags.add(t));
+        frontmatter.tags = Array.from(existingTags).sort();
+        changes.push(`added tags: ${tags.join(', ')}`);
+      }
+
+      // Merge properties if provided
+      if (properties) {
+        Object.entries(properties).forEach(([key, value]) => {
+          frontmatter[key] = value;
+          changes.push(`set ${key}=${value}`);
+        });
+      }
+
+      // Generate new file content
+      const yamlStr = yaml.dump(frontmatter, { sortKeys: true, lineWidth: -1 });
+      const newFileContent = `---\n${yamlStr}---\n\n${body}`;
+
+      await fs.writeFile(fullPath, newFileContent, 'utf-8');
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Updated note: ${notePath}\nChanges: ${changes.join(', ')}`,
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error updating note: ${error instanceof Error ? error.message : "Unknown error"}`,
+        }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool: delete_note
+server.tool(
+  "delete_note",
+  "Delete or archive a note. By default, moves to Archive folder instead of permanent deletion.",
+  {
+    path: z.string().min(1).describe("Relative path to the note within KMW folder"),
+    permanent: z.boolean().optional().describe("If true, permanently delete instead of archiving (default: false)"),
+  },
+  async ({ path: notePath, permanent }) => {
+    try {
+      const searchPath = path.join(VAULT_PATH, "KMW");
+      const fullPath = path.join(searchPath, notePath);
+
+      // Validate path stays within vault
+      const resolvedPath = path.resolve(fullPath);
+      if (!resolvedPath.startsWith(path.resolve(searchPath))) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Error: Path must be within the vault",
+          }],
+          isError: true,
+        };
+      }
+
+      // Check file exists
+      try {
+        await fs.access(fullPath);
+      } catch {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Note not found: ${notePath}`,
+          }],
+          isError: true,
+        };
+      }
+
+      if (permanent) {
+        // Permanent deletion
+        await fs.unlink(fullPath);
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Permanently deleted: ${notePath}`,
+          }]
+        };
+      } else {
+        // Move to Archive
+        const fileName = path.basename(notePath);
+        const archivePath = path.join(searchPath, "Archive");
+        const archiveFilePath = path.join(archivePath, fileName);
+
+        // Ensure Archive folder exists
+        await fs.mkdir(archivePath, { recursive: true });
+
+        // Check if file already exists in archive
+        try {
+          await fs.access(archiveFilePath);
+          // File exists, add timestamp to name
+          const ext = path.extname(fileName);
+          const baseName = path.basename(fileName, ext);
+          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const newFileName = `${baseName}-${timestamp}${ext}`;
+          const newArchiveFilePath = path.join(archivePath, newFileName);
+          await fs.rename(fullPath, newArchiveFilePath);
+          return {
+            content: [{
+              type: "text" as const,
+              text: `Archived: ${notePath} → Archive/${newFileName}`,
+            }]
+          };
+        } catch {
+          // File doesn't exist in archive, proceed normally
+          await fs.rename(fullPath, archiveFilePath);
+          return {
+            content: [{
+              type: "text" as const,
+              text: `Archived: ${notePath} → Archive/${fileName}`,
+            }]
+          };
+        }
+      }
+    } catch (error) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error deleting note: ${error instanceof Error ? error.message : "Unknown error"}`,
+        }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool: daily_note
+server.tool(
+  "daily_note",
+  "Create or append to a daily note. Creates a new note for the date if it doesn't exist, or appends to existing.",
+  {
+    content: z.string().min(1).describe("Content to add to the daily note"),
+    date: z.string().optional().describe("Date in YYYY-MM-DD format (defaults to today)"),
+    section: z.string().optional().describe("Section header to add content under (e.g., 'Notes', 'Tasks', 'Meetings')"),
+  },
+  async ({ content, date, section }) => {
+    try {
+      const searchPath = path.join(VAULT_PATH, "KMW");
+      const targetDate = date || new Date().toISOString().split('T')[0];
+
+      // Validate date format
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Error: Date must be in YYYY-MM-DD format",
+          }],
+          isError: true,
+        };
+      }
+
+      const dailyFolder = path.join(searchPath, "Daily");
+      const fileName = `${targetDate}.md`;
+      const fullPath = path.join(dailyFolder, fileName);
+
+      // Ensure Daily folder exists
+      await fs.mkdir(dailyFolder, { recursive: true });
+
+      let existingContent = "";
+      let isNew = false;
+
+      try {
+        existingContent = await fs.readFile(fullPath, 'utf-8');
+      } catch {
+        // File doesn't exist, create new
+        isNew = true;
+      }
+
+      let newFileContent: string;
+
+      if (isNew) {
+        // Create new daily note with frontmatter
+        const frontmatter = {
+          title: `Daily Note - ${targetDate}`,
+          date: targetDate,
+          type: 'daily',
+          tags: ['daily']
+        };
+        const yamlStr = yaml.dump(frontmatter, { sortKeys: true });
+
+        if (section) {
+          newFileContent = `---\n${yamlStr}---\n\n## ${section}\n\n${content}\n`;
+        } else {
+          newFileContent = `---\n${yamlStr}---\n\n${content}\n`;
+        }
+      } else {
+        // Append to existing
+        if (section) {
+          // Check if section exists
+          const sectionRegex = new RegExp(`^## ${section}\\s*$`, 'm');
+          if (sectionRegex.test(existingContent)) {
+            // Append under existing section
+            newFileContent = existingContent.replace(
+              sectionRegex,
+              `## ${section}\n\n${content}\n`
+            );
+          } else {
+            // Add new section at the end
+            newFileContent = existingContent.trimEnd() + `\n\n## ${section}\n\n${content}\n`;
+          }
+        } else {
+          newFileContent = existingContent.trimEnd() + `\n\n${content}\n`;
+        }
+      }
+
+      await fs.writeFile(fullPath, newFileContent, 'utf-8');
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: isNew
+            ? `Created daily note: Daily/${fileName}`
+            : `Updated daily note: Daily/${fileName}`,
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error with daily note: ${error instanceof Error ? error.message : "Unknown error"}`,
+        }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool: query_by_tags
+server.tool(
+  "query_by_tags",
+  "Find notes that match specific tags with AND/OR logic",
+  {
+    tags: z.array(z.string()).min(1).describe("Tags to search for (without # prefix)"),
+    match: z.enum(["all", "any"]).optional().describe("'all' requires all tags (AND), 'any' requires at least one (OR). Default: 'all'"),
+    limit: z.number().int().positive().max(100).optional().describe("Max results (default 20)"),
+  },
+  async ({ tags, match, limit }) => {
+    try {
+      const matchMode = match || "all";
+      const maxResults = limit || 20;
+      const searchPath = path.join(VAULT_PATH, "KMW");
+      const results: Array<{ file: string; title: string; tags: string[]; matchedTags: string[] }> = [];
+
+      async function searchDir(dir: string): Promise<void> {
+        if (results.length >= maxResults) return;
+
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+
+        for (const entry of entries) {
+          if (results.length >= maxResults) return;
+          if (entry.name.startsWith('.')) continue;
+
+          const fullPath = path.join(dir, entry.name);
+
+          if (entry.isDirectory()) {
+            await searchDir(fullPath);
+          } else if (entry.name.endsWith('.md')) {
+            try {
+              const content = await fs.readFile(fullPath, 'utf-8');
+              const parsed = parseFrontmatter(content);
+
+              if (parsed?.frontmatter?.tags && Array.isArray(parsed.frontmatter.tags)) {
+                const noteTags = parsed.frontmatter.tags as string[];
+                const matchedTags = tags.filter(t => noteTags.includes(t));
+
+                const isMatch = matchMode === "all"
+                  ? matchedTags.length === tags.length
+                  : matchedTags.length > 0;
+
+                if (isMatch) {
+                  const relativePath = path.relative(searchPath, fullPath);
+                  const title = parsed.frontmatter.title || entry.name.replace('.md', '');
+
+                  results.push({
+                    file: relativePath,
+                    title,
+                    tags: noteTags,
+                    matchedTags,
+                  });
+                }
+              }
+            } catch {
+              // Skip files that can't be read
+            }
+          }
+        }
+      }
+
+      await searchDir(searchPath);
+
+      if (results.length === 0) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `No notes found with ${matchMode === "all" ? "all" : "any"} of these tags: ${tags.join(', ')}`,
+          }]
+        };
+      }
+
+      // Sort by number of matched tags (descending)
+      results.sort((a, b) => b.matchedTags.length - a.matchedTags.length);
+
+      let responseText = `## Notes matching ${matchMode === "all" ? "ALL" : "ANY"} of: ${tags.join(', ')}\n\n`;
+      responseText += `Found ${results.length} note(s):\n\n`;
+
+      results.forEach((r, i) => {
+        responseText += `${i + 1}. **${r.title}**\n`;
+        responseText += `   File: ${r.file}\n`;
+        responseText += `   Tags: ${r.tags.join(', ')}\n`;
+        if (matchMode === "any") {
+          responseText += `   Matched: ${r.matchedTags.join(', ')}\n`;
+        }
+        responseText += '\n';
+      });
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: responseText.trim()
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error querying by tags: ${error instanceof Error ? error.message : "Unknown error"}`,
+        }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool: move_note
+server.tool(
+  "move_note",
+  "Move a note to a different folder within the vault",
+  {
+    source: z.string().min(1).describe("Current relative path to the note"),
+    destination: z.string().min(1).describe("Destination folder (e.g., 'Customers/Gartner/Technical' or 'Archive')"),
+    updateLinks: z.boolean().optional().describe("Update wikilinks in other notes (default: true) - NOT YET IMPLEMENTED"),
+  },
+  async ({ source, destination }) => {
+    try {
+      const searchPath = path.join(VAULT_PATH, "KMW");
+      const sourcePath = path.join(searchPath, source);
+      const fileName = path.basename(source);
+      const destFolder = path.join(searchPath, destination);
+      const destPath = path.join(destFolder, fileName);
+
+      // Validate source path stays within vault
+      const resolvedSource = path.resolve(sourcePath);
+      if (!resolvedSource.startsWith(path.resolve(searchPath))) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Error: Source path must be within the vault",
+          }],
+          isError: true,
+        };
+      }
+
+      // Validate destination path stays within vault
+      const resolvedDest = path.resolve(destPath);
+      if (!resolvedDest.startsWith(path.resolve(searchPath))) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Error: Destination path must be within the vault",
+          }],
+          isError: true,
+        };
+      }
+
+      // Check source exists
+      try {
+        await fs.access(sourcePath);
+      } catch {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Source note not found: ${source}`,
+          }],
+          isError: true,
+        };
+      }
+
+      // Check destination doesn't already have the file
+      try {
+        await fs.access(destPath);
+        return {
+          content: [{
+            type: "text" as const,
+            text: `A note with this name already exists at destination: ${destination}/${fileName}`,
+          }],
+          isError: true,
+        };
+      } catch {
+        // Good - file doesn't exist at destination
+      }
+
+      // Ensure destination folder exists
+      await fs.mkdir(destFolder, { recursive: true });
+
+      // Move the file
+      await fs.rename(sourcePath, destPath);
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Moved: ${source} → ${destination}/${fileName}`,
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error moving note: ${error instanceof Error ? error.message : "Unknown error"}`,
+        }],
+        isError: true,
+      };
+    }
+  }
+);
+
 // Main function
 async function main() {
   const transport = new StdioServerTransport();
