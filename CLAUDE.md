@@ -97,6 +97,8 @@ Restart Claude Desktop after saving.
 | Server | Description |
 |--------|-------------|
 | `slinky-do` | Comprehensive Obsidian vault integration with 13 MCP tools: manage todos (add, list, complete), perform full CRUD operations on notes (create, read, update, delete, move, daily notes), search via full-text or tags, and auto-enrich vault metadata. Supports dynamic vault scanning, frontmatter management, and intelligent tagging across 142+ notes in multi-customer environments (Gartner, Nasuni, ThermoFisher, Lucille). |
+| `memory` | Persistent knowledge graph across Claude CLI sessions. Store entities, relations, and observations that persist between conversations. Tools: create_entities, create_relations, add_observations, delete_entities, delete_observations, delete_relations, read_graph, search_nodes, open_nodes. |
+| `git` | Comprehensive Git operations via MCP. Tools: git_add, git_branch, git_checkout, git_cherry_pick, git_clean, git_clone, git_commit, git_diff, git_fetch, git_init, git_log, git_merge, git_pull, git_push, git_rebase, git_remote, git_reset, git_show, git_stash, git_status, git_tag, git_worktree, git_wrapup_instructions. |
 
 ## Git Workflow
 
@@ -137,4 +139,6 @@ Use these slash commands for specialized assistance:
 | `/security-expert` | Security hardening and vulnerability scanning |
 | `/langchain-expert` | LangChain/LangGraph integration if adding AI features |
 | `/opensearch-expert` | OpenSearch integration if adding search backend |
-| `/web-designer` | UI design if adding a web interface
+| `/web-designer` | UI design if adding a web interface |
+| `/code-reviewer` | Comprehensive code review for logic, quality, performance, security, maintainability |
+| `/resume-expert` | Resume writing, optimization, and ATS tailoring |

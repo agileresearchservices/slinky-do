@@ -23,7 +23,29 @@
       "Bash(done)",
       "Bash(git checkout:*)",
       "mcp__slinky-do__get_vault_info",
-      "Bash(npm test)"
+      "Bash(npm test)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nEnhance slinky-do server description in documentation\n\nExpand the Available MCP Servers section to comprehensively describe slinky-do''s \n13 tools and capabilities: todo management, full CRUD note operations, advanced \nsearch \\(full-text and tag-based\\), vault enrichment, dynamic scanning, and support \nfor multi-customer environments with 142+ notes.\n\nCo-Authored-By: Claude Haiku 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "mcp__slinky-do__query_by_tags",
+      "mcp__slinky-do__get_note",
+      "mcp__slinky-do__update_note",
+      "mcp__slinky-do__move_note",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:mcp.composio.dev)",
+      "Bash(claude mcp add:*)",
+      "Bash(claude mcp:*)",
+      "Bash(uvx:*)",
+      "mcp__memory__read_graph",
+      "mcp__memory__create_entities",
+      "mcp__memory__create_relations",
+      "mcp__memory__delete_relations",
+      "mcp__memory__add_observations",
+      "mcp__git__git_status",
+      "mcp__git__git_diff",
+      "mcp__git__git_log",
+      "mcp__git__git_add"
     ]
   }
 }
