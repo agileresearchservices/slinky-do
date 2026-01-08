@@ -67,6 +67,12 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 
 Restart Claude Desktop after saving.
 
+## Available MCP Servers
+
+| Server | Description |
+|--------|-------------|
+| `slinky-do` | Add todos, create notes, and search the Obsidian vault |
+
 ## Available Skills
 
 Use these slash commands for specialized assistance:
