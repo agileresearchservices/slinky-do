@@ -96,7 +96,7 @@ Restart Claude Desktop after saving.
 
 | Server | Description |
 |--------|-------------|
-| `slinky-do` | Add todos, create notes, and search the Obsidian vault |
+| `slinky-do` | Comprehensive Obsidian vault integration with 13 MCP tools: manage todos (add, list, complete), perform full CRUD operations on notes (create, read, update, delete, move, daily notes), search via full-text or tags, and auto-enrich vault metadata. Supports dynamic vault scanning, frontmatter management, and intelligent tagging across 142+ notes in multi-customer environments (Gartner, Nasuni, ThermoFisher, Lucille). |
 
 ## Git Workflow
 
