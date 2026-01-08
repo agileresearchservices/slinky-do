@@ -38,15 +38,31 @@ Default: `/Users/kevin/Library/Mobile Documents/iCloud~md~obsidian/Documents/KMW
 
 ## Claude CLI Integration
 
-Add to `~/.claude/config.json` under `mcpServers`:
+```bash
+claude mcp add -s user slinky-do -- node /Users/kevin/github/personal/slinky-do/dist/index.js
+```
+
+Verify with:
+```bash
+claude mcp list
+```
+
+## Claude Desktop Integration
+
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
 
 ```json
 {
   "mcpServers": {
     "slinky-do": {
       "command": "node",
-      "args": ["/Users/kevin/github/personal/slinky-do/dist/index.js"]
+      "args": ["/Users/kevin/github/personal/slinky-do/dist/index.js"],
+      "env": {
+        "OBSIDIAN_VAULT_PATH": "/Users/kevin/Library/Mobile Documents/iCloud~md~obsidian/Documents/KMW"
+      }
     }
   }
 }
 ```
+
+Restart Claude Desktop after saving.
