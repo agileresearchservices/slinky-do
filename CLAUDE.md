@@ -73,6 +73,10 @@ Restart Claude Desktop after saving.
 |--------|-------------|
 | `slinky-do` | Add todos, create notes, and search the Obsidian vault |
 
+## Git Workflow
+
+Always use `/document-commit` for any git-related activities (committing, pushing changes).
+
 ## Available Skills
 
 Use these slash commands for specialized assistance:
