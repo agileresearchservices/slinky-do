@@ -42,7 +42,9 @@ server.tool(
       const todoItem = `- [ ]${tagString} ${text}`;
 
       // Append to file
-      const newContent = content.trimEnd() + "\n" + todoItem + "\n";
+      const newContent = content.trim()
+        ? content.trimEnd() + "\n" + todoItem + "\n"
+        : todoItem + "\n";
 
       // Ensure directory exists
       await fs.mkdir(path.dirname(TODO_FILE), { recursive: true });
@@ -85,6 +87,21 @@ server.tool(
       const targetFolder = folder || DEFAULT_INBOX;
       const folderPath = path.join(VAULT_PATH, "KMW", targetFolder);
 
+      // Validate path stays within vault
+      const resolvedFolder = path.resolve(folderPath);
+      const vaultBase = path.resolve(VAULT_PATH, "KMW");
+      if (!resolvedFolder.startsWith(vaultBase + path.sep) && resolvedFolder !== vaultBase) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "Error: Folder path must be within the vault",
+            },
+          ],
+          isError: true,
+        };
+      }
+
       // Generate filename from title
       const filename = title
         .toLowerCase()
@@ -107,6 +124,22 @@ tags: [${tagsArray.map(t => `"${t}"`).join(", ")}]
 
       // Ensure directory exists
       await fs.mkdir(folderPath, { recursive: true });
+
+      // Check if file already exists
+      try {
+        await fs.access(filepath);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Note already exists: ${filename}\nLocation: ${filepath}\nChoose a different title or delete the existing note.`,
+            },
+          ],
+          isError: true,
+        };
+      } catch {
+        // File doesn't exist - proceed with creation
+      }
 
       // Write file
       await fs.writeFile(filepath, noteContent, "utf-8");
