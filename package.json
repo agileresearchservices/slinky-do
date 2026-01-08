@@ -15,7 +15,12 @@
     "type": "git",
     "url": "git+https://github.com/agileresearchservices/slinky-do.git"
   },
-  "keywords": ["mcp", "obsidian", "todo", "notes"],
+  "keywords": [
+    "mcp",
+    "obsidian",
+    "todo",
+    "notes"
+  ],
   "author": "",
   "license": "ISC",
   "type": "module",
@@ -25,6 +30,8 @@
   "homepage": "https://github.com/agileresearchservices/slinky-do#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.2",
+    "@types/js-yaml": "^4.0.9",
+    "js-yaml": "^4.1.1",
     "zod": "^4.3.5"
   },
   "devDependencies": {

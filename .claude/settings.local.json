@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(code-reviewer)",
+      "Bash(npm run build:*)",
+      "mcp__slinky-do__search_notes",
+      "Bash(git -C /Users/kevin/github/personal/slinky-do status)",
+      "Bash(git -C /Users/kevin/github/personal/slinky-do diff)",
+      "Skill(document-commit)",
+      "Bash(git -C /Users/kevin/github/personal/slinky-do log --oneline -3)",
+      "Bash(git -C /Users/kevin/github/personal/slinky-do add src/index.ts)",
+      "Bash(git -C /Users/kevin/github/personal/slinky-do commit -m \"$\\(cat <<''EOF''\nFix security and edge case issues in MCP tools\n\n- Prevent path traversal in create_note by validating folder stays within vault\n- Add file existence check in create_note to prevent silent overwrites\n- Fix leading newline when adding first todo to empty TODO.md\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git -C /Users/kevin/github/personal/slinky-do push)",
+      "Bash(git -C /Users/kevin/github/personal/slinky-do add CLAUDE.md)",
+      "Bash(git -C /Users/kevin/github/personal/slinky-do commit -m \"$\\(cat <<''EOF''\nAdd git workflow guidance to CLAUDE.md\n\nInstructs Claude to use /document-commit for all git-related activities.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "mcp__slinky-do__add_todo",
+      "Skill(opensearch-expert)",
+      "mcp__slinky-do__create_note",
+      "Bash(find:*)",
+      "Bash(npm install:*)"
+    ]
+  }
+}

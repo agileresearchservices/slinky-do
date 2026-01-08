@@ -5,12 +5,179 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import fs from "fs/promises";
 import path from "path";
+import * as yaml from "js-yaml";
 
 // Configuration
 const VAULT_PATH = process.env.OBSIDIAN_VAULT_PATH ||
   "/Users/kevin/Library/Mobile Documents/iCloud~md~obsidian/Documents/KMW";
 const TODO_FILE = path.join(VAULT_PATH, "KMW/TODO.md");
 const DEFAULT_INBOX = "Inbox";
+
+// Types for vault enrichment
+interface InferredMetadata {
+  title: string;
+  tags: Set<string>;
+  customer?: string;
+  project?: string;
+  type?: string;
+  status: string;
+  date?: string;
+}
+
+// Vault enrichment helper functions
+function inferMetadataFromPath(filePath: string, fileName: string): InferredMetadata {
+  const metadata: InferredMetadata = {
+    title: fileName.replace(/\.md$/, '').replace(/_/g, ' '),
+    tags: new Set<string>(),
+    status: 'active'
+  };
+
+  // Infer customer from path
+  if (filePath.includes('Customers/Gartner')) {
+    metadata.customer = 'gartner';
+    metadata.tags.add('gartner');
+  } else if (filePath.includes('Customers/Nasuni')) {
+    metadata.customer = 'nasuni';
+    metadata.tags.add('nasuni');
+  } else if (filePath.includes('Customers/ThermoFisher')) {
+    metadata.customer = 'thermofisher';
+    metadata.tags.add('thermofisher');
+  }
+
+  // Infer project from path
+  if (filePath.includes('Hyrule Project')) {
+    metadata.project = 'hyrule';
+    metadata.tags.add('hyrule');
+  } else if (filePath.includes('Weekly Insights')) {
+    metadata.project = 'weekly-insights';
+  } else if (filePath.includes('Lucille')) {
+    metadata.project = 'lucille';
+    metadata.tags.add('lucille');
+  }
+
+  // Infer type from folder
+  if (filePath.includes('Standups')) {
+    metadata.type = 'standup';
+    metadata.tags.add('standup');
+  } else if (filePath.includes('Documentation') || filePath.includes('Docs')) {
+    metadata.type = 'documentation';
+    metadata.tags.add('docs');
+  } else if (filePath.includes('Research')) {
+    metadata.type = 'research';
+    metadata.tags.add('research');
+  } else if (filePath.includes('Governance')) {
+    metadata.type = 'governance';
+    metadata.tags.add('governance');
+  } else if (filePath.includes('Working Sessions')) {
+    metadata.type = 'working-session';
+    metadata.tags.add('working-session');
+  } else if (filePath.includes('Configs and Keys')) {
+    metadata.type = 'config';
+    metadata.tags.add('config');
+  } else if (filePath.includes('Technical')) {
+    metadata.type = 'technical';
+    metadata.tags.add('technical');
+  } else if (filePath.includes('Code references')) {
+    metadata.type = 'code-reference';
+    metadata.tags.add('code-ref');
+  }
+
+  // Extract date from filename (MMDDYYYY format)
+  const dateMatch = fileName.match(/(\d{8})/);
+  if (dateMatch) {
+    const dateStr = dateMatch[1];
+    // Assume MMDDYYYY format
+    const month = dateStr.substring(0, 2);
+    const day = dateStr.substring(2, 4);
+    const year = dateStr.substring(4, 8);
+    metadata.date = `${year}-${month}-${day}`;
+  }
+
+  return metadata;
+}
+
+function inferTagsFromContent(content: string, existingTags: Set<string>): string[] {
+  const tags = new Set(existingTags);
+  const contentLower = content.toLowerCase();
+
+  // Technology tags
+  if (contentLower.includes('opensearch')) tags.add('opensearch');
+  if (contentLower.includes('lucille')) tags.add('lucille');
+  if (contentLower.includes('kubernetes') || contentLower.includes('eks')) tags.add('kubernetes');
+  if (contentLower.includes('aws') || contentLower.includes('sagemaker')) tags.add('aws');
+  if (contentLower.includes('python')) tags.add('python');
+  if (contentLower.includes('java')) tags.add('java');
+  if (contentLower.includes('docker')) tags.add('docker');
+  if (contentLower.includes('security') || contentLower.includes('cve-')) tags.add('security');
+  if (contentLower.includes('architecture')) tags.add('architecture');
+  if (contentLower.includes('hybrid') || contentLower.includes('bm25') || contentLower.includes('neural')) {
+    tags.add('hybrid-search');
+  }
+  if (contentLower.includes('ltr') || contentLower.includes('learning to rank')) tags.add('ltr');
+  if (contentLower.includes('relevancy') || contentLower.includes('relevance')) tags.add('relevancy');
+  if (contentLower.includes('spellcheck') || contentLower.includes('fuzziness')) {
+    tags.add('search-features');
+  }
+
+  return Array.from(tags).sort();
+}
+
+function parseFrontmatter(content: string): { frontmatter: any; body: string } | null {
+  if (!content.startsWith('---')) {
+    return null;
+  }
+
+  const match = content.match(/^---\n(.*?)\n---\n(.*)$/s);
+  if (!match) {
+    return null;
+  }
+
+  try {
+    const frontmatter = yaml.load(match[1]) || {};
+    const body = match[2];
+    return { frontmatter, body };
+  } catch {
+    return null;
+  }
+}
+
+function mergeFrontmatter(existing: any, inferred: InferredMetadata): any {
+  const merged = { ...existing };
+
+  // Only add fields that don't exist
+  if (!merged.title) merged.title = inferred.title;
+  if (!merged.date && inferred.date) merged.date = inferred.date;
+  if (!merged.customer && inferred.customer) merged.customer = inferred.customer;
+  if (!merged.project && inferred.project) merged.project = inferred.project;
+  if (!merged.type && inferred.type) merged.type = inferred.type;
+  if (!merged.status) merged.status = inferred.status;
+
+  // Merge tags (combine existing with inferred)
+  const existingTags = new Set(merged.tags || []);
+  const inferredTags = new Set(inferred.tags);
+  merged.tags = Array.from(new Set([...existingTags, ...inferredTags])).sort();
+
+  return merged;
+}
+
+function fixMalformedDate(date: string, fileName: string): string {
+  // Check if date looks malformed (starts with 0 and is in YYYY-MM-DD format)
+  if (typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date) && date.startsWith('0')) {
+    // Try to extract correct date from filename
+    const dateMatch = fileName.match(/(\d{8})/);
+    if (dateMatch) {
+      const dateStr = dateMatch[1];
+      const month = dateStr.substring(0, 2);
+      const day = dateStr.substring(2, 4);
+      const year = dateStr.substring(4, 8);
+      const correctedDate = `${year}-${month}-${day}`;
+      if (correctedDate !== date) {
+        return correctedDate;
+      }
+    }
+  }
+  return date;
+}
 
 // Initialize MCP server
 const server = new McpServer({
@@ -381,6 +548,112 @@ server.tool(
           },
         ],
         isError: true,
+      };
+    }
+  }
+);
+
+// Tool: enrich_vault
+server.tool(
+  "enrich_vault",
+  "Enrich all markdown files in the vault with intelligent YAML frontmatter, metadata, and tags inferred from folder structure and content. Merges with existing frontmatter without overwriting user edits.",
+  {},
+  async () => {
+    try {
+      const searchPath = path.join(VAULT_PATH, "KMW");
+      let processed = 0;
+      let enhanced = 0;
+      let datesFixed = 0;
+      const errors: string[] = [];
+
+      // Recursive function to process files
+      async function processDir(dir: string): Promise<void> {
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+
+        for (const entry of entries) {
+          const fullPath = path.join(dir, entry.name);
+
+          // Skip .obsidian folder
+          if (entry.name.startsWith('.')) continue;
+
+          if (entry.isDirectory()) {
+            await processDir(fullPath);
+          } else if (entry.name.endsWith('.md')) {
+            try {
+              // Read file content
+              const content = await fs.readFile(fullPath, 'utf-8');
+              const relativePath = path.relative(searchPath, fullPath);
+
+              // Infer metadata from path
+              const inferred = inferMetadataFromPath(relativePath, entry.name);
+
+              // Parse existing frontmatter
+              const parsed = parseFrontmatter(content);
+              const existingFm = parsed?.frontmatter || {};
+              const body = parsed?.body || content;
+
+              // Infer tags from content
+              const contentTags = inferTagsFromContent(body, inferred.tags);
+              inferred.tags = new Set(contentTags);
+
+              // Merge frontmatter
+              let mergedFm = mergeFrontmatter(existingFm, inferred);
+
+              // Fix malformed dates
+              if (mergedFm.date) {
+                const originalDate = mergedFm.date;
+                mergedFm.date = fixMalformedDate(mergedFm.date, entry.name);
+                if (mergedFm.date !== originalDate) {
+                  datesFixed++;
+                }
+              }
+
+              // Generate YAML frontmatter
+              const yamlStr = yaml.dump(mergedFm, { sortKeys: true, lineWidth: -1 });
+              const newContent = `---\n${yamlStr}---\n\n${body}`;
+
+              // Write file
+              await fs.writeFile(fullPath, newContent, 'utf-8');
+
+              processed++;
+              if (!parsed) {
+                enhanced++; // File didn't have frontmatter before
+              }
+            } catch (error) {
+              errors.push(`${entry.name}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            }
+          }
+        }
+      }
+
+      await processDir(searchPath);
+
+      let summary = `## Vault Enrichment Complete\n\n`;
+      summary += `- **Processed**: ${processed} markdown files\n`;
+      summary += `- **Enhanced**: ${enhanced} files (added frontmatter)\n`;
+      summary += `- **Dates Fixed**: ${datesFixed} malformed dates corrected\n`;
+
+      if (errors.length > 0) {
+        summary += `\n## Errors (${errors.length})\n\n`;
+        summary += errors.slice(0, 10).map(e => `- ${e}`).join('\n');
+        if (errors.length > 10) {
+          summary += `\n- ... and ${errors.length - 10} more`;
+        }
+      }
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: summary
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error enriching vault: ${error instanceof Error ? error.message : "Unknown error"}`
+        }],
+        isError: true
       };
     }
   }
