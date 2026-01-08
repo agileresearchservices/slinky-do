@@ -1,98 +1,12 @@
 import { describe, it, expect } from 'vitest';
+import {
+  parseTodos,
+  parseFrontmatter,
+  fixMalformedDate,
+  isPathWithinVault,
+} from './index.js';
 
-// Helper function implementations (copied for testing)
-// In a production setup, these would be exported from index.ts
-
-interface TodoItem {
-  id: number;
-  text: string;
-  completed: boolean;
-  tags: string[];
-  line: number;
-}
-
-function parseTodos(content: string): TodoItem[] {
-  const todos: TodoItem[] = [];
-  const lines = content.split('\n');
-
-  lines.forEach((line, index) => {
-    const match = line.match(/^-\s*\[([ xX])\]\s*(.*)$/);
-    if (match) {
-      const completed = match[1].toLowerCase() === 'x';
-      const rest = match[2];
-
-      const tagMatches = rest.match(/#\w+/g) || [];
-      const tags = tagMatches.map(t => t.substring(1));
-
-      const text = rest.replace(/#\w+\s*/g, '').trim();
-
-      todos.push({
-        id: todos.length + 1,
-        text,
-        completed,
-        tags,
-        line: index + 1,
-      });
-    }
-  });
-
-  return todos;
-}
-
-function parseFrontmatter(content: string): { frontmatter: any; body: string } | null {
-  if (!content.startsWith('---')) {
-    return null;
-  }
-
-  const match = content.match(/^---\n(.*?)\n---\n(.*)$/s);
-  if (!match) {
-    return null;
-  }
-
-  try {
-    // Simple YAML parsing for tests (basic key: value pairs)
-    const frontmatter: Record<string, any> = {};
-    const yamlLines = match[1].split('\n');
-    for (const line of yamlLines) {
-      const kvMatch = line.match(/^(\w+):\s*(.*)$/);
-      if (kvMatch) {
-        let value: any = kvMatch[2];
-        // Handle arrays like [tag1, tag2]
-        if (value.startsWith('[') && value.endsWith(']')) {
-          value = value.slice(1, -1).split(',').map((s: string) => s.trim().replace(/"/g, ''));
-        }
-        // Handle quoted strings
-        if (typeof value === 'string' && value.startsWith('"') && value.endsWith('"')) {
-          value = value.slice(1, -1);
-        }
-        frontmatter[kvMatch[1]] = value;
-      }
-    }
-    const body = match[2];
-    return { frontmatter, body };
-  } catch {
-    return null;
-  }
-}
-
-function fixMalformedDate(date: string, fileName: string): string {
-  if (typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date) && date.startsWith('0')) {
-    const dateMatch = fileName.match(/(\d{8})/);
-    if (dateMatch) {
-      const dateStr = dateMatch[1];
-      const month = dateStr.substring(0, 2);
-      const day = dateStr.substring(2, 4);
-      const year = dateStr.substring(4, 8);
-      const correctedDate = `${year}-${month}-${day}`;
-      if (correctedDate !== date) {
-        return correctedDate;
-      }
-    }
-  }
-  return date;
-}
-
-// Tests
+// Tests for parseTodos
 
 describe('parseTodos', () => {
   it('should parse a simple incomplete todo', () => {
@@ -171,6 +85,8 @@ More text`;
   });
 });
 
+// Tests for parseFrontmatter
+
 describe('parseFrontmatter', () => {
   it('should parse simple frontmatter', () => {
     const content = `---
@@ -183,7 +99,8 @@ Content here`;
 
     expect(result).not.toBeNull();
     expect(result?.frontmatter.title).toBe('My Note');
-    expect(result?.frontmatter.date).toBe('2024-01-15');
+    // js-yaml parses dates as Date objects
+    expect(result?.frontmatter.date).toBeInstanceOf(Date);
     expect(result?.body).toContain('Content here');
   });
 
@@ -222,7 +139,21 @@ Body`;
 
     expect(result?.frontmatter.tags).toEqual(['tag1', 'tag2', 'tag3']);
   });
+
+  it('should handle frontmatter with no body content', () => {
+    const content = `---
+title: Empty Note
+---
+`;
+    const result = parseFrontmatter(content);
+
+    expect(result).not.toBeNull();
+    expect(result?.frontmatter.title).toBe('Empty Note');
+    expect(result?.body.trim()).toBe('');
+  });
 });
+
+// Tests for fixMalformedDate
 
 describe('fixMalformedDate', () => {
   it('should fix malformed date starting with 0', () => {
@@ -251,24 +182,36 @@ describe('fixMalformedDate', () => {
   });
 });
 
-describe('Path validation scenarios', () => {
-  it('should identify path traversal attempts', () => {
-    const vaultBase = '/Users/kevin/vault/KMW';
-    const maliciousPath = '../../../etc/passwd';
+// Tests for isPathWithinVault
 
-    // Simulating the path resolution logic
-    const resolvedPath = '/Users/kevin/vault/KMW/' + maliciousPath;
-    const normalizedPath = resolvedPath.replace(/\/\.\.\//g, '/');
+describe('isPathWithinVault', () => {
+  const vaultBase = '/Users/kevin/vault/KMW';
 
-    // The actual check in the code
-    expect(normalizedPath.includes('..')).toBe(true);
+  it('should accept paths within the vault', () => {
+    expect(isPathWithinVault('/Users/kevin/vault/KMW/notes.md', vaultBase)).toBe(true);
+    expect(isPathWithinVault('/Users/kevin/vault/KMW/Customers/Gartner/file.md', vaultBase)).toBe(true);
   });
 
-  it('should allow valid nested paths', () => {
-    const validPath = 'Customers/Gartner/Technical/notes.md';
-    expect(validPath.includes('..')).toBe(false);
+  it('should accept the vault base path itself', () => {
+    expect(isPathWithinVault('/Users/kevin/vault/KMW', vaultBase)).toBe(true);
+  });
+
+  it('should reject paths outside the vault', () => {
+    expect(isPathWithinVault('/Users/kevin/vault/other/file.md', vaultBase)).toBe(false);
+    expect(isPathWithinVault('/etc/passwd', vaultBase)).toBe(false);
+  });
+
+  it('should reject path traversal attempts', () => {
+    expect(isPathWithinVault('/Users/kevin/vault/KMW/../../../etc/passwd', vaultBase)).toBe(false);
+  });
+
+  it('should reject paths that start with vault name but are different', () => {
+    // This is the security fix - KMW-evil should not pass
+    expect(isPathWithinVault('/Users/kevin/vault/KMW-evil/file.md', vaultBase)).toBe(false);
   });
 });
+
+// Tests for filename generation
 
 describe('Filename generation', () => {
   it('should convert title to valid filename', () => {

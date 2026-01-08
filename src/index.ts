@@ -41,6 +41,16 @@ interface TodoItem {
   line: number;
 }
 
+// Derived paths
+const VAULT_KMW_PATH = path.join(VAULT_PATH, "KMW");
+
+// Path validation helper - ensures paths stay within vault
+function isPathWithinVault(targetPath: string, vaultBase: string = VAULT_KMW_PATH): boolean {
+  const resolved = path.resolve(targetPath);
+  const base = path.resolve(vaultBase);
+  return resolved === base || resolved.startsWith(base + path.sep);
+}
+
 // Vault enrichment helper functions
 function inferMetadataFromPath(filePath: string, fileName: string): InferredMetadata {
   const metadata: InferredMetadata = {
@@ -360,12 +370,10 @@ server.tool(
   async ({ title, content, folder, tags }) => {
     try {
       const targetFolder = folder || DEFAULT_INBOX;
-      const folderPath = path.join(VAULT_PATH, "KMW", targetFolder);
+      const folderPath = path.join(VAULT_KMW_PATH, targetFolder);
 
       // Validate path stays within vault
-      const resolvedFolder = path.resolve(folderPath);
-      const vaultBase = path.resolve(VAULT_PATH, "KMW");
-      if (!resolvedFolder.startsWith(vaultBase + path.sep) && resolvedFolder !== vaultBase) {
+      if (!isPathWithinVault(folderPath)) {
         return {
           content: [
             {
@@ -452,7 +460,7 @@ server.tool(
   async ({ query, limit }) => {
     try {
       const maxResults = limit || 10;
-      const searchPath = path.join(VAULT_PATH, "KMW");
+      const searchPath = VAULT_KMW_PATH;
       const results: Array<{ file: string; title: string; excerpt: string }> = [];
       const queryLower = query.toLowerCase();
 
@@ -558,7 +566,7 @@ server.tool(
   async ({ section }) => {
     try {
       const infoSection = section || "all";
-      const searchPath = path.join(VAULT_PATH, "KMW");
+      const searchPath = VAULT_KMW_PATH;
 
       // Scan the vault dynamically
       const stats = await scanVault(searchPath);
@@ -668,7 +676,7 @@ server.tool(
   {},
   async () => {
     try {
-      const searchPath = path.join(VAULT_PATH, "KMW");
+      const searchPath = VAULT_KMW_PATH;
       let processed = 0;
       let enhanced = 0;
       let datesFixed = 0;
@@ -776,12 +784,10 @@ server.tool(
   },
   async ({ path: notePath }) => {
     try {
-      const searchPath = path.join(VAULT_PATH, "KMW");
-      const fullPath = path.join(searchPath, notePath);
+      const fullPath = path.join(VAULT_KMW_PATH, notePath);
 
       // Validate path stays within vault
-      const resolvedPath = path.resolve(fullPath);
-      if (!resolvedPath.startsWith(path.resolve(searchPath))) {
+      if (!isPathWithinVault(fullPath)) {
         return {
           content: [{
             type: "text" as const,
@@ -1070,12 +1076,10 @@ server.tool(
   },
   async ({ path: notePath, content: newContent, append, tags, properties }) => {
     try {
-      const searchPath = path.join(VAULT_PATH, "KMW");
-      const fullPath = path.join(searchPath, notePath);
+      const fullPath = path.join(VAULT_KMW_PATH, notePath);
 
       // Validate path stays within vault
-      const resolvedPath = path.resolve(fullPath);
-      if (!resolvedPath.startsWith(path.resolve(searchPath))) {
+      if (!isPathWithinVault(fullPath)) {
         return {
           content: [{
             type: "text" as const,
@@ -1167,12 +1171,10 @@ server.tool(
   },
   async ({ path: notePath, permanent }) => {
     try {
-      const searchPath = path.join(VAULT_PATH, "KMW");
-      const fullPath = path.join(searchPath, notePath);
+      const fullPath = path.join(VAULT_KMW_PATH, notePath);
 
       // Validate path stays within vault
-      const resolvedPath = path.resolve(fullPath);
-      if (!resolvedPath.startsWith(path.resolve(searchPath))) {
+      if (!isPathWithinVault(fullPath)) {
         return {
           content: [{
             type: "text" as const,
@@ -1207,7 +1209,7 @@ server.tool(
       } else {
         // Move to Archive
         const fileName = path.basename(notePath);
-        const archivePath = path.join(searchPath, "Archive");
+        const archivePath = path.join(VAULT_KMW_PATH, "Archive");
         const archiveFilePath = path.join(archivePath, fileName);
 
         // Ensure Archive folder exists
@@ -1263,7 +1265,7 @@ server.tool(
   },
   async ({ content, date, section }) => {
     try {
-      const searchPath = path.join(VAULT_PATH, "KMW");
+      const searchPath = VAULT_KMW_PATH;
       const targetDate = date || new Date().toISOString().split('T')[0];
 
       // Validate date format
@@ -1316,12 +1318,23 @@ server.tool(
         if (section) {
           // Check if section exists
           const sectionRegex = new RegExp(`^## ${section}\\s*$`, 'm');
-          if (sectionRegex.test(existingContent)) {
-            // Append under existing section
-            newFileContent = existingContent.replace(
-              sectionRegex,
-              `## ${section}\n\n${content}\n`
-            );
+          const sectionMatch = existingContent.match(sectionRegex);
+          if (sectionMatch && sectionMatch.index !== undefined) {
+            // Find the end of this section (next ## heading or end of file)
+            const sectionStart = sectionMatch.index;
+            const afterSection = existingContent.substring(sectionStart + sectionMatch[0].length);
+            const nextSectionMatch = afterSection.match(/^## /m);
+
+            if (nextSectionMatch && nextSectionMatch.index !== undefined) {
+              // Insert before next section
+              const insertPoint = sectionStart + sectionMatch[0].length + nextSectionMatch.index;
+              const before = existingContent.substring(0, insertPoint).trimEnd();
+              const after = existingContent.substring(insertPoint);
+              newFileContent = before + `\n\n${content}\n\n` + after;
+            } else {
+              // No next section, append at end of file
+              newFileContent = existingContent.trimEnd() + `\n\n${content}\n`;
+            }
           } else {
             // Add new section at the end
             newFileContent = existingContent.trimEnd() + `\n\n## ${section}\n\n${content}\n`;
@@ -1366,7 +1379,7 @@ server.tool(
     try {
       const matchMode = match || "all";
       const maxResults = limit || 20;
-      const searchPath = path.join(VAULT_PATH, "KMW");
+      const searchPath = VAULT_KMW_PATH;
       const results: Array<{ file: string; title: string; tags: string[]; matchedTags: string[] }> = [];
 
       async function searchDir(dir: string): Promise<void> {
@@ -1470,15 +1483,13 @@ server.tool(
   },
   async ({ source, destination }) => {
     try {
-      const searchPath = path.join(VAULT_PATH, "KMW");
-      const sourcePath = path.join(searchPath, source);
+      const sourcePath = path.join(VAULT_KMW_PATH, source);
       const fileName = path.basename(source);
-      const destFolder = path.join(searchPath, destination);
+      const destFolder = path.join(VAULT_KMW_PATH, destination);
       const destPath = path.join(destFolder, fileName);
 
       // Validate source path stays within vault
-      const resolvedSource = path.resolve(sourcePath);
-      if (!resolvedSource.startsWith(path.resolve(searchPath))) {
+      if (!isPathWithinVault(sourcePath)) {
         return {
           content: [{
             type: "text" as const,
@@ -1489,8 +1500,7 @@ server.tool(
       }
 
       // Validate destination path stays within vault
-      const resolvedDest = path.resolve(destPath);
-      if (!resolvedDest.startsWith(path.resolve(searchPath))) {
+      if (!isPathWithinVault(destPath)) {
         return {
           content: [{
             type: "text" as const,
@@ -1562,3 +1572,16 @@ main().catch((error) => {
   console.error("[slinky-do] Fatal error:", error);
   process.exit(1);
 });
+
+// Export helpers for testing
+export {
+  parseTodos,
+  parseFrontmatter,
+  fixMalformedDate,
+  isPathWithinVault,
+  inferMetadataFromPath,
+  inferTagsFromContent,
+  mergeFrontmatter,
+};
+
+export type { TodoItem, InferredMetadata, VaultStats };
