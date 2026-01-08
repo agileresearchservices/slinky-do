@@ -13,6 +13,8 @@ npm install     # Install dependencies
 npm run build   # Compile TypeScript to dist/
 npm run dev     # Watch mode for development
 npm start       # Run the compiled server
+npm test        # Run tests with Vitest
+npm run test:watch  # Run tests in watch mode
 ```
 
 ## Architecture
@@ -24,12 +26,33 @@ Single TypeScript file MCP server (`src/index.ts`) using:
 
 ## MCP Tools
 
+### Todo Management
 | Tool | Description |
 |------|-------------|
 | `add_todo` | Append todo to `KMW/TODO.md` with optional tags |
+| `list_todos` | List all todos with status, tags, and IDs (filter by status/tag) |
+| `complete_todo` | Mark a todo as completed by ID or text match |
+
+### Note Operations
+| Tool | Description |
+|------|-------------|
 | `create_note` | Create note with frontmatter in vault (folder, properties, tags) |
-| `search_notes` | Search vault content, filenames, and tags |
-| `get_vault_info` | Get vault structure, tags, properties, and statistics |
+| `get_note` | Read a specific note's content, frontmatter, and metadata |
+| `update_note` | Update note content, tags, or properties (replace, append, merge) |
+| `delete_note` | Archive or permanently delete a note |
+| `move_note` | Move a note to a different folder |
+| `daily_note` | Create or append to daily notes with optional sections |
+
+### Search & Discovery
+| Tool | Description |
+|------|-------------|
+| `search_notes` | Full-text search across vault content and filenames |
+| `query_by_tags` | Find notes by tags with AND/OR logic |
+| `get_vault_info` | Get real-time vault structure, tags, properties (dynamic scanning) |
+
+### Vault Maintenance
+| Tool | Description |
+|------|-------------|
 | `enrich_vault` | Enrich all notes with intelligent frontmatter and tags |
 
 ## Configuration
