@@ -79,6 +79,30 @@ Restart Claude Desktop after saving.
 
 Always use `/document-commit` for any git-related activities (committing, pushing changes).
 
+## Security Best Practices
+
+**⚠️ WARNING - Sensitive Data in Vault Files:**
+
+When reading files from the Obsidian vault, be aware that some notes may contain sensitive information:
+- AWS credentials (access keys, secret keys)
+- API keys and tokens
+- Database passwords
+- Private keys and certificates
+
+**Claude's Response:**
+1. **Always flag sensitive data** - If credentials, API keys, or passwords are discovered in files, immediately alert the user
+2. **Recommend remediation** - Suggest rotating exposed credentials
+3. **Never commit credentials** - Never include sensitive data in git commits
+4. **Use secure storage** - Recommend AWS Secrets Manager, HashiCorp Vault, or similar for credential management
+5. **Document the risk** - Help document which files contain sensitive data so they can be protected
+
+**User Responsibility:**
+- Keep credential files out of version control (.gitignore)
+- Use environment variables or secret management tools instead of hardcoded values
+- Regularly rotate credentials
+- Use access controls to limit who can read credential files
+- Monitor CloudTrail/audit logs for unauthorized access
+
 ## Available Skills
 
 Use these slash commands for specialized assistance:
