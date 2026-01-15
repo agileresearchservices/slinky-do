@@ -416,6 +416,89 @@ async function updateWikilinksInFile(
   }
 }
 
+// Build a set of all note names in the vault (for link validation)
+async function getAllNoteNames(vaultPath: string): Promise<Set<string>> {
+  const noteNames = new Set<string>();
+
+  async function scanDir(dir: string): Promise<void> {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+
+      const fullPath = path.join(dir, entry.name);
+
+      if (entry.isDirectory()) {
+        await scanDir(fullPath);
+      } else if (entry.name.endsWith('.md')) {
+        // Add both the full relative path and just the note name
+        const relativePath = path.relative(vaultPath, fullPath);
+        const noteName = entry.name.replace('.md', '');
+        noteNames.add(noteName.toLowerCase());
+        noteNames.add(relativePath.replace('.md', '').toLowerCase());
+      }
+    }
+  }
+
+  await scanDir(vaultPath);
+  return noteNames;
+}
+
+// Check if a wikilink target exists in the vault
+function isValidWikilink(linkTarget: string, validNotes: Set<string>): boolean {
+  const targetLower = linkTarget.toLowerCase();
+  // Check if it matches any note name (with or without path)
+  if (validNotes.has(targetLower)) return true;
+  // Check just the note name part (last segment of path)
+  const noteName = targetLower.split('/').pop() || targetLower;
+  return validNotes.has(noteName);
+}
+
+// Find all broken wikilinks in the vault
+async function findBrokenLinks(
+  vaultPath: string
+): Promise<Array<{ file: string; title: string; brokenLinks: string[] }>> {
+  const validNotes = await getAllNoteNames(vaultPath);
+  const brokenLinkResults: Array<{ file: string; title: string; brokenLinks: string[] }> = [];
+
+  async function scanDir(dir: string): Promise<void> {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+
+      const fullPath = path.join(dir, entry.name);
+
+      if (entry.isDirectory()) {
+        await scanDir(fullPath);
+      } else if (entry.name.endsWith('.md')) {
+        try {
+          const content = await fs.readFile(fullPath, 'utf-8');
+          const links = extractWikilinks(content);
+          const brokenLinks = links.filter(link => !isValidWikilink(link, validNotes));
+
+          if (brokenLinks.length > 0) {
+            const parsed = parseFrontmatter(content);
+            const relativePath = path.relative(vaultPath, fullPath);
+            const title = parsed?.frontmatter?.title || entry.name.replace('.md', '');
+
+            brokenLinkResults.push({
+              file: relativePath,
+              title,
+              brokenLinks,
+            });
+          }
+        } catch {
+          // Skip files that can't be read
+        }
+      }
+    }
+  }
+
+  await scanDir(vaultPath);
+  return brokenLinkResults;
+}
+
 // Get cached vault stats or scan if cache is stale
 async function getCachedVaultStats(vaultPath: string): Promise<VaultStats> {
   if (isCacheValid() && vaultCache.stats) {
@@ -1816,6 +1899,209 @@ server.tool(
         content: [{
           type: "text" as const,
           text: `Error finding backlinks: ${error instanceof Error ? error.message : "Unknown error"}`,
+        }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool: validate_vault
+server.tool(
+  "validate_vault",
+  "Check the vault for broken wikilinks (links to notes that don't exist) and other consistency issues",
+  {
+    fix: z.boolean().optional().describe("Automatically remove broken links (default: false, just report)"),
+  },
+  async ({ fix }) => {
+    try {
+      const brokenLinks = await findBrokenLinks(VAULT_KMW_PATH);
+
+      if (brokenLinks.length === 0) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "## Vault Validation\n\n✓ No broken wikilinks found. All links point to existing notes.",
+          }]
+        };
+      }
+
+      const totalBroken = brokenLinks.reduce((sum, item) => sum + item.brokenLinks.length, 0);
+      let responseText = `## Vault Validation\n\n`;
+      responseText += `Found ${totalBroken} broken wikilink(s) in ${brokenLinks.length} file(s):\n\n`;
+
+      // Sort by number of broken links (most first)
+      brokenLinks.sort((a, b) => b.brokenLinks.length - a.brokenLinks.length);
+
+      let fixedCount = 0;
+      for (const item of brokenLinks) {
+        responseText += `### ${item.title}\n`;
+        responseText += `File: ${item.file}\n`;
+        responseText += `Broken links:\n`;
+        item.brokenLinks.forEach(link => {
+          responseText += `  - [[${link}]]\n`;
+        });
+        responseText += '\n';
+
+        // Fix broken links if requested
+        if (fix) {
+          const fullPath = path.join(VAULT_KMW_PATH, item.file);
+          try {
+            let content = await fs.readFile(fullPath, 'utf-8');
+            for (const link of item.brokenLinks) {
+              // Remove broken wikilinks, keeping any alias text
+              const escapedLink = link.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              // [[broken|Alias Text]] -> Alias Text
+              // [[broken]] -> broken
+              content = content.replace(
+                new RegExp(`\\[\\[${escapedLink}\\|([^\\]]+)\\]\\]`, 'g'),
+                '$1'
+              );
+              content = content.replace(
+                new RegExp(`\\[\\[${escapedLink}\\]\\]`, 'g'),
+                link.split('/').pop() || link
+              );
+            }
+            await fs.writeFile(fullPath, content, 'utf-8');
+            fixedCount++;
+          } catch {
+            // Skip files that can't be fixed
+          }
+        }
+      }
+
+      if (fix) {
+        responseText += `---\n*Fixed ${fixedCount} file(s) by removing broken wikilinks.*`;
+        invalidateCache();
+      } else {
+        responseText += `---\n*Run with fix=true to remove broken links.*`;
+      }
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: responseText.trim()
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error validating vault: ${error instanceof Error ? error.message : "Unknown error"}`,
+        }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool: rename_note
+server.tool(
+  "rename_note",
+  "Rename a note and optionally update all wikilinks in other notes that reference it",
+  {
+    path: z.string().min(1).describe("Relative path to the note (e.g., 'Inbox/old-name.md')"),
+    newName: z.string().min(1).describe("New name for the note (without .md extension)"),
+    updateLinks: z.boolean().optional().describe("Update wikilinks in other notes (default: true)"),
+  },
+  async ({ path: notePath, newName, updateLinks }) => {
+    try {
+      const shouldUpdateLinks = updateLinks !== false; // Default true
+      const fullPath = path.join(VAULT_KMW_PATH, notePath);
+      const directory = path.dirname(fullPath);
+      const oldName = getNoteNameFromPath(notePath);
+      const newFileName = `${newName}.md`;
+      const newFullPath = path.join(directory, newFileName);
+      const newRelativePath = path.join(path.dirname(notePath), newFileName);
+
+      // Validate paths
+      if (!isPathWithinVault(fullPath)) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Error: Path must be within the vault",
+          }],
+          isError: true,
+        };
+      }
+
+      // Check source exists
+      try {
+        await fs.access(fullPath);
+      } catch {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Note not found: ${notePath}`,
+          }],
+          isError: true,
+        };
+      }
+
+      // Check destination doesn't exist
+      try {
+        await fs.access(newFullPath);
+        return {
+          content: [{
+            type: "text" as const,
+            text: `A note with name "${newName}" already exists in this folder.`,
+          }],
+          isError: true,
+        };
+      } catch {
+        // Good - destination doesn't exist
+      }
+
+      // Rename the file
+      await fs.rename(fullPath, newFullPath);
+
+      // Update the title in frontmatter
+      try {
+        const content = await fs.readFile(newFullPath, 'utf-8');
+        const parsed = parseFrontmatter(content);
+        if (parsed?.frontmatter) {
+          parsed.frontmatter.title = newName.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+          const yamlStr = yaml.dump(parsed.frontmatter, { sortKeys: true, lineWidth: -1 });
+          const newContent = `---\n${yamlStr}---\n\n${parsed.body}`;
+          await fs.writeFile(newFullPath, newContent, 'utf-8');
+        }
+      } catch {
+        // Non-critical, continue even if frontmatter update fails
+      }
+
+      // Update wikilinks in other notes
+      let linksUpdated = 0;
+      if (shouldUpdateLinks) {
+        const backlinks = await findBacklinks(VAULT_KMW_PATH, oldName);
+
+        for (const backlink of backlinks) {
+          const backlinkPath = path.join(VAULT_KMW_PATH, backlink.file);
+          if (backlinkPath === newFullPath) continue; // Skip the renamed file itself
+
+          const updated = await updateWikilinksInFile(backlinkPath, oldName, newName);
+          if (updated) linksUpdated++;
+        }
+      }
+
+      // Invalidate cache
+      invalidateCache();
+
+      let responseText = `Renamed: ${notePath} → ${newRelativePath}`;
+      if (shouldUpdateLinks) {
+        responseText += `\nUpdated ${linksUpdated} file(s) with wikilinks to this note.`;
+      }
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: responseText,
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error renaming note: ${error instanceof Error ? error.message : "Unknown error"}`,
         }],
         isError: true,
       };
