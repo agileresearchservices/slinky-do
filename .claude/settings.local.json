@@ -52,7 +52,10 @@
       "mcp__slinky-do__list_todos",
       "Bash(kill:*)",
       "Bash(pkill:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Skill(ralph-loop:ralph-loop)",
+      "Bash(npm test:*)"
     ]
   }
 }
