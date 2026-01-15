@@ -47,7 +47,12 @@
       "mcp__git__git_log",
       "mcp__git__git_add",
       "mcp__git__git_commit",
-      "mcp__git__git_push"
+      "mcp__git__git_push",
+      "Bash(git pull:*)",
+      "mcp__slinky-do__list_todos",
+      "Bash(kill:*)",
+      "Bash(pkill:*)",
+      "Bash(git commit:*)"
     ]
   }
 }

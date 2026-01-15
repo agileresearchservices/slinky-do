@@ -54,6 +54,7 @@ interface TodoItem {
   completed: boolean;
   tags: string[];
   line: number;
+  indent: number;
 }
 
 // Derived paths
@@ -517,11 +518,15 @@ function parseTodos(content: string): TodoItem[] {
   const lines = content.split('\n');
 
   lines.forEach((line, index) => {
-    // Match: - [ ] or - [x] followed by optional tags and text
-    const match = line.match(/^-\s*\[([ xX])\]\s*(.*)$/);
+    // Match: optional whitespace, then - [ ] or - [x] followed by optional tags and text
+    const match = line.match(/^(\s*)-\s*\[([ xX])\]\s*(.*)$/);
     if (match) {
-      const completed = match[1].toLowerCase() === 'x';
-      const rest = match[2];
+      const leadingWhitespace = match[1];
+      const completed = match[2].toLowerCase() === 'x';
+      const rest = match[3];
+
+      // Calculate indent level (count of leading whitespace characters)
+      const indent = leadingWhitespace.length;
 
       // Extract tags (words starting with #)
       const tagMatches = rest.match(/#\w+/g) || [];
@@ -536,6 +541,7 @@ function parseTodos(content: string): TodoItem[] {
         completed,
         tags,
         line: index + 1, // 1-indexed line number
+        indent,
       });
     }
   });
@@ -1363,8 +1369,9 @@ server.tool(
       if (pending.length > 0 && filterStatus !== "completed") {
         responseText += `### Pending (${pending.length})\n\n`;
         pending.forEach(todo => {
+          const indentStr = '  '.repeat(todo.indent); // 2 spaces per indent level (1 tab or 1 space = 1 level)
           const tagStr = todo.tags.length > 0 ? ` [${todo.tags.map(t => `#${t}`).join(' ')}]` : '';
-          responseText += `${todo.id}. [ ] ${todo.text}${tagStr}\n`;
+          responseText += `${indentStr}${todo.id}. [ ] ${todo.text}${tagStr}\n`;
         });
         responseText += "\n";
       }
@@ -1372,8 +1379,9 @@ server.tool(
       if (completed.length > 0 && filterStatus !== "pending") {
         responseText += `### Completed (${completed.length})\n\n`;
         completed.forEach(todo => {
+          const indentStr = '  '.repeat(todo.indent); // 2 spaces per indent level
           const tagStr = todo.tags.length > 0 ? ` [${todo.tags.map(t => `#${t}`).join(' ')}]` : '';
-          responseText += `${todo.id}. [x] ${todo.text}${tagStr}\n`;
+          responseText += `${indentStr}${todo.id}. [x] ${todo.text}${tagStr}\n`;
         });
       }
 
