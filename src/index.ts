@@ -1044,41 +1044,73 @@ server.tool(
 // Tool: enrich_vault
 server.tool(
   "enrich_vault",
-  "Enrich all markdown files in the vault with intelligent YAML frontmatter, metadata, and tags inferred from folder structure and content. Merges with existing frontmatter without overwriting user edits.",
-  {},
-  async () => {
+  "Enrich markdown files with intelligent YAML frontmatter inferred from folder structure and content. Only writes files when changes are detected.",
+  {
+    dryRun: z.boolean().optional().describe("Preview changes without writing files (default: false)"),
+    folder: z.string().optional().describe("Only process files in this folder (e.g., 'Customers/Gartner')"),
+    force: z.boolean().optional().describe("Process all files even if they already have frontmatter (default: false)"),
+  },
+  async ({ dryRun, folder, force }) => {
     try {
-      const searchPath = VAULT_KMW_PATH;
-      let processed = 0;
-      let enhanced = 0;
+      const isDryRun = dryRun === true;
+      const forceAll = force === true;
+      const targetFolder = folder ? path.join(VAULT_KMW_PATH, folder) : VAULT_KMW_PATH;
+
+      // Validate folder path
+      if (folder && !isPathWithinVault(targetFolder)) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Error: Folder must be within the vault",
+          }],
+          isError: true,
+        };
+      }
+
+      let scanned = 0;
+      let modified = 0;
+      let skipped = 0;
       let datesFixed = 0;
+      const changes: string[] = [];
       const errors: string[] = [];
 
       // Recursive function to process files
       async function processDir(dir: string): Promise<void> {
-        const entries = await fs.readdir(dir, { withFileTypes: true });
+        let entries;
+        try {
+          entries = await fs.readdir(dir, { withFileTypes: true });
+        } catch {
+          return; // Folder doesn't exist or can't be read
+        }
 
         for (const entry of entries) {
           const fullPath = path.join(dir, entry.name);
 
-          // Skip .obsidian folder
+          // Skip .obsidian folder and hidden files
           if (entry.name.startsWith('.')) continue;
 
           if (entry.isDirectory()) {
             await processDir(fullPath);
           } else if (entry.name.endsWith('.md')) {
+            scanned++;
             try {
               // Read file content
               const content = await fs.readFile(fullPath, 'utf-8');
-              const relativePath = path.relative(searchPath, fullPath);
-
-              // Infer metadata from path
-              const inferred = inferMetadataFromPath(relativePath, entry.name);
+              const relativePath = path.relative(VAULT_KMW_PATH, fullPath);
 
               // Parse existing frontmatter
               const parsed = parseFrontmatter(content);
               const existingFm = parsed?.frontmatter || {};
               const body = parsed?.body || content;
+
+              // Skip files that already have complete frontmatter (unless force)
+              if (!forceAll && parsed?.frontmatter && existingFm.title && existingFm.tags) {
+                skipped++;
+                continue;
+              }
+
+              // Infer metadata from path
+              const inferred = inferMetadataFromPath(relativePath, entry.name);
 
               // Infer tags from content
               const contentTags = inferTagsFromContent(body, inferred.tags);
@@ -1087,26 +1119,45 @@ server.tool(
               // Merge frontmatter
               let mergedFm = mergeFrontmatter(existingFm, inferred);
 
-              // Fix malformed dates
+              // Track if date was fixed
+              let dateWasFixed = false;
               if (mergedFm.date) {
                 const originalDate = mergedFm.date;
                 mergedFm.date = fixMalformedDate(mergedFm.date, entry.name);
                 if (mergedFm.date !== originalDate) {
-                  datesFixed++;
+                  dateWasFixed = true;
                 }
               }
 
-              // Generate YAML frontmatter
+              // Generate new content
               const yamlStr = yaml.dump(mergedFm, { sortKeys: true, lineWidth: -1 });
               const newContent = `---\n${yamlStr}---\n\n${body}`;
 
-              // Write file
-              await fs.writeFile(fullPath, newContent, 'utf-8');
-
-              processed++;
-              if (!parsed) {
-                enhanced++; // File didn't have frontmatter before
+              // Check if content actually changed
+              if (newContent === content) {
+                skipped++;
+                continue;
               }
+
+              // Track changes
+              const changeDetails: string[] = [];
+              if (!parsed) changeDetails.push('added frontmatter');
+              if (dateWasFixed) {
+                changeDetails.push('fixed date');
+                datesFixed++;
+              }
+              if (existingFm.tags?.length !== mergedFm.tags?.length) {
+                changeDetails.push('added tags');
+              }
+
+              changes.push(`${relativePath}: ${changeDetails.join(', ') || 'updated metadata'}`);
+
+              // Write file (unless dry run)
+              if (!isDryRun) {
+                await fs.writeFile(fullPath, newContent, 'utf-8');
+              }
+              modified++;
+
             } catch (error) {
               errors.push(`${entry.name}: ${error instanceof Error ? error.message : 'Unknown error'}`);
             }
@@ -1114,25 +1165,56 @@ server.tool(
         }
       }
 
-      await processDir(searchPath);
+      await processDir(targetFolder);
 
-      let summary = `## Vault Enrichment Complete\n\n`;
-      summary += `- **Processed**: ${processed} markdown files\n`;
-      summary += `- **Enhanced**: ${enhanced} files (added frontmatter)\n`;
-      summary += `- **Dates Fixed**: ${datesFixed} malformed dates corrected\n`;
+      // Build summary
+      let summary = `## Vault Enrichment ${isDryRun ? '(Dry Run)' : 'Complete'}\n\n`;
+      if (folder) {
+        summary += `**Target folder**: ${folder}\n\n`;
+      }
+      summary += `- **Scanned**: ${scanned} markdown files\n`;
+      summary += `- **${isDryRun ? 'Would modify' : 'Modified'}**: ${modified} files\n`;
+      summary += `- **Skipped**: ${skipped} files (already enriched or unchanged)\n`;
+      if (datesFixed > 0) {
+        summary += `- **Dates fixed**: ${datesFixed}\n`;
+      }
+
+      if (changes.length > 0 && changes.length <= 20) {
+        summary += `\n### ${isDryRun ? 'Files to be modified' : 'Modified files'}:\n`;
+        changes.forEach(c => {
+          summary += `- ${c}\n`;
+        });
+      } else if (changes.length > 20) {
+        summary += `\n### ${isDryRun ? 'Files to be modified' : 'Modified files'} (showing first 20):\n`;
+        changes.slice(0, 20).forEach(c => {
+          summary += `- ${c}\n`;
+        });
+        summary += `- ... and ${changes.length - 20} more\n`;
+      }
 
       if (errors.length > 0) {
-        summary += `\n## Errors (${errors.length})\n\n`;
-        summary += errors.slice(0, 10).map(e => `- ${e}`).join('\n');
-        if (errors.length > 10) {
-          summary += `\n- ... and ${errors.length - 10} more`;
+        summary += `\n### Errors (${errors.length}):\n`;
+        errors.slice(0, 5).forEach(e => {
+          summary += `- ${e}\n`;
+        });
+        if (errors.length > 5) {
+          summary += `- ... and ${errors.length - 5} more\n`;
         }
+      }
+
+      if (isDryRun && modified > 0) {
+        summary += `\n---\n*Run without dryRun=true to apply these changes.*`;
+      }
+
+      // Invalidate cache if we made changes
+      if (!isDryRun && modified > 0) {
+        invalidateCache();
       }
 
       return {
         content: [{
           type: "text" as const,
-          text: summary
+          text: summary.trim()
         }]
       };
     } catch (error) {
