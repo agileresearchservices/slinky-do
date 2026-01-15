@@ -1120,13 +1120,13 @@ describe('parseTodos - comprehensive edge cases', () => {
 
 describe('inferTagsFromContent - comprehensive patterns', () => {
   it('should handle case variations', () => {
-    const tags = inferTagsFromContent('OpenSearch opensearch OPENSEARCH');
+    const tags = inferTagsFromContent('OpenSearch opensearch OPENSEARCH', new Set());
     expect(tags).toContain('opensearch');
   });
 
   it('should detect multiple search technologies', () => {
     const content = 'OpenSearch with BM25 and neural ranking for relevancy tuning';
-    const tags = inferTagsFromContent(content);
+    const tags = inferTagsFromContent(content, new Set());
 
     expect(tags).toContain('opensearch');
     expect(tags).toContain('hybrid-search');
@@ -1134,13 +1134,13 @@ describe('inferTagsFromContent - comprehensive patterns', () => {
   });
 
   it('should handle acronyms', () => {
-    const tags = inferTagsFromContent('Deploy on EKS and use AWS services');
+    const tags = inferTagsFromContent('Deploy on EKS and use AWS services', new Set());
     expect(tags).toContain('kubernetes');
     expect(tags).toContain('aws');
   });
 
   it('should handle security mentions', () => {
-    const tags = inferTagsFromContent('CVE-2024-1234 vulnerability assessment');
+    const tags = inferTagsFromContent('CVE-2024-1234 vulnerability assessment', new Set());
     expect(tags).toContain('security');
   });
 });

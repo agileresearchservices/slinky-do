@@ -113,7 +113,7 @@ This project uses:
 - CVE scanning for security
       `;
 
-      const tags = inferTagsFromContent(content);
+      const tags = inferTagsFromContent(content, new Set());
       
       expect(tags).toContain('opensearch');
       expect(tags).toContain('kubernetes');
