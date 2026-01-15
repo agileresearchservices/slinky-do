@@ -10,8 +10,23 @@ import * as yaml from "js-yaml";
 // Configuration
 const VAULT_PATH = process.env.OBSIDIAN_VAULT_PATH ||
   "/Users/kevin/Library/Mobile Documents/iCloud~md~obsidian/Documents/KMW";
-const TODO_FILE = path.join(VAULT_PATH, "KMW/TODO.md");
-const DEFAULT_INBOX = "Inbox";
+
+// Configurable folder names (can be overridden via environment variables)
+const CONFIG = {
+  // Relative path to TODO file from KMW folder
+  todoFile: process.env.SLINKY_TODO_FILE || "KMW/TODO.md",
+  // Default folder for new notes
+  inboxFolder: process.env.SLINKY_INBOX_FOLDER || "Inbox",
+  // Archive folder for deleted notes
+  archiveFolder: process.env.SLINKY_ARCHIVE_FOLDER || "Archive",
+  // Daily notes folder
+  dailyFolder: process.env.SLINKY_DAILY_FOLDER || "Daily",
+  // Cache TTL for vault stats in milliseconds (default: 30 seconds)
+  cacheTtlMs: parseInt(process.env.SLINKY_CACHE_TTL_MS || "30000", 10),
+} as const;
+
+const TODO_FILE = path.join(VAULT_PATH, CONFIG.todoFile);
+const DEFAULT_INBOX = CONFIG.inboxFolder;
 
 // Types for vault enrichment
 interface InferredMetadata {
@@ -43,6 +58,27 @@ interface TodoItem {
 
 // Derived paths
 const VAULT_KMW_PATH = path.join(VAULT_PATH, "KMW");
+
+// Vault stats cache
+interface VaultStatsCache {
+  stats: VaultStats | null;
+  timestamp: number;
+}
+
+const vaultCache: VaultStatsCache = {
+  stats: null,
+  timestamp: 0,
+};
+
+function isCacheValid(): boolean {
+  return vaultCache.stats !== null &&
+         (Date.now() - vaultCache.timestamp) < CONFIG.cacheTtlMs;
+}
+
+function invalidateCache(): void {
+  vaultCache.stats = null;
+  vaultCache.timestamp = 0;
+}
 
 // Path validation helper - ensures paths stay within vault
 function isPathWithinVault(targetPath: string, vaultBase: string = VAULT_KMW_PATH): boolean {
@@ -264,6 +300,35 @@ async function scanVault(vaultPath: string): Promise<VaultStats> {
   return stats;
 }
 
+// Human-readable time ago string
+function getTimeAgo(date: Date): string {
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+
+  if (diffMins < 1) return 'just now';
+  if (diffMins < 60) return `${diffMins} minute${diffMins === 1 ? '' : 's'} ago`;
+  if (diffHours < 24) return `${diffHours} hour${diffHours === 1 ? '' : 's'} ago`;
+  if (diffDays === 1) return 'yesterday';
+  if (diffDays < 7) return `${diffDays} days ago`;
+  if (diffDays < 30) return `${Math.floor(diffDays / 7)} week${Math.floor(diffDays / 7) === 1 ? '' : 's'} ago`;
+  return date.toLocaleDateString();
+}
+
+// Get cached vault stats or scan if cache is stale
+async function getCachedVaultStats(vaultPath: string): Promise<VaultStats> {
+  if (isCacheValid() && vaultCache.stats) {
+    return vaultCache.stats;
+  }
+
+  const stats = await scanVault(vaultPath);
+  vaultCache.stats = stats;
+  vaultCache.timestamp = Date.now();
+  return stats;
+}
+
 // Parse TODO.md into structured items
 function parseTodos(content: string): TodoItem[] {
   const todos: TodoItem[] = [];
@@ -427,6 +492,9 @@ tags: [${tagsArray.map(t => `"${t}"`).join(", ")}]
       // Write file
       await fs.writeFile(filepath, noteContent, "utf-8");
 
+      // Invalidate cache since vault structure changed
+      invalidateCache();
+
       return {
         content: [
           {
@@ -558,18 +626,26 @@ server.tool(
 // Tool: get_vault_info (dynamic scanning)
 server.tool(
   "get_vault_info",
-  "Get real-time information about the vault structure, available tags, properties, and statistics by scanning the actual vault",
+  "Get real-time information about the vault structure, available tags, properties, and statistics. Results are cached for 30 seconds - use refresh=true to force a fresh scan.",
   {
     section: z.enum(["all", "tags", "properties", "folders", "stats"]).optional()
-      .describe("Which section to return (defaults to 'all')")
+      .describe("Which section to return (defaults to 'all')"),
+    refresh: z.boolean().optional()
+      .describe("Force a fresh vault scan, ignoring cache (default: false)")
   },
-  async ({ section }) => {
+  async ({ section, refresh }) => {
     try {
       const infoSection = section || "all";
       const searchPath = VAULT_KMW_PATH;
 
-      // Scan the vault dynamically
-      const stats = await scanVault(searchPath);
+      // Invalidate cache if refresh requested
+      if (refresh) {
+        invalidateCache();
+      }
+
+      // Get vault stats (cached or fresh)
+      const wasCached = isCacheValid();
+      const stats = await getCachedVaultStats(searchPath);
 
       let responseText = "";
 
@@ -649,6 +725,11 @@ server.tool(
         });
       }
 
+      // Add cache status indicator
+      const cacheAge = Date.now() - vaultCache.timestamp;
+      const cacheAgeSeconds = Math.round(cacheAge / 1000);
+      responseText += `\n---\n*${wasCached ? `Cached (${cacheAgeSeconds}s ago)` : "Fresh scan"} - use refresh=true to force update*`;
+
       return {
         content: [{
           type: "text" as const,
@@ -663,6 +744,115 @@ server.tool(
             text: `Error getting vault info: ${error instanceof Error ? error.message : "Unknown error"}`,
           },
         ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool: get_recent_notes
+server.tool(
+  "get_recent_notes",
+  "List notes that were recently modified, sorted by modification time (most recent first)",
+  {
+    days: z.number().int().positive().max(365).optional()
+      .describe("Number of days to look back (default: 7)"),
+    limit: z.number().int().positive().max(100).optional()
+      .describe("Maximum number of notes to return (default: 20)"),
+  },
+  async ({ days, limit }) => {
+    try {
+      const lookbackDays = days || 7;
+      const maxResults = limit || 20;
+      const searchPath = VAULT_KMW_PATH;
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - lookbackDays);
+
+      const results: Array<{
+        file: string;
+        title: string;
+        modified: Date;
+        tags: string[];
+      }> = [];
+
+      async function searchDir(dir: string): Promise<void> {
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+
+        for (const entry of entries) {
+          if (entry.name.startsWith('.')) continue;
+
+          const fullPath = path.join(dir, entry.name);
+
+          if (entry.isDirectory()) {
+            await searchDir(fullPath);
+          } else if (entry.name.endsWith('.md')) {
+            try {
+              const stats = await fs.stat(fullPath);
+              if (stats.mtime >= cutoffDate) {
+                const content = await fs.readFile(fullPath, 'utf-8');
+                const parsed = parseFrontmatter(content);
+                const relativePath = path.relative(searchPath, fullPath);
+                const title = parsed?.frontmatter?.title || entry.name.replace('.md', '');
+                const tags = parsed?.frontmatter?.tags || [];
+
+                results.push({
+                  file: relativePath,
+                  title,
+                  modified: stats.mtime,
+                  tags: Array.isArray(tags) ? tags : [],
+                });
+              }
+            } catch {
+              // Skip files that can't be read
+            }
+          }
+        }
+      }
+
+      await searchDir(searchPath);
+
+      // Sort by modification time (most recent first)
+      results.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+
+      // Limit results
+      const limited = results.slice(0, maxResults);
+
+      if (limited.length === 0) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `No notes modified in the last ${lookbackDays} day(s).`,
+          }]
+        };
+      }
+
+      let responseText = `## Recently Modified Notes\n\n`;
+      responseText += `Found ${limited.length} note(s) modified in the last ${lookbackDays} day(s)`;
+      if (results.length > maxResults) {
+        responseText += ` (showing ${maxResults} of ${results.length})`;
+      }
+      responseText += `:\n\n`;
+
+      limited.forEach((r, i) => {
+        const timeAgo = getTimeAgo(r.modified);
+        const tagStr = r.tags.length > 0 ? ` [${r.tags.slice(0, 3).join(', ')}${r.tags.length > 3 ? '...' : ''}]` : '';
+        responseText += `${i + 1}. **${r.title}**${tagStr}\n`;
+        responseText += `   ${r.file}\n`;
+        responseText += `   *${timeAgo}*\n\n`;
+      });
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: responseText.trim()
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error getting recent notes: ${error instanceof Error ? error.message : "Unknown error"}`,
+        }],
         isError: true,
       };
     }
@@ -1143,6 +1333,9 @@ server.tool(
 
       await fs.writeFile(fullPath, newFileContent, 'utf-8');
 
+      // Invalidate cache since note metadata may have changed
+      invalidateCache();
+
       return {
         content: [{
           type: "text" as const,
@@ -1200,6 +1393,7 @@ server.tool(
       if (permanent) {
         // Permanent deletion
         await fs.unlink(fullPath);
+        invalidateCache();
         return {
           content: [{
             type: "text" as const,
@@ -1209,7 +1403,7 @@ server.tool(
       } else {
         // Move to Archive
         const fileName = path.basename(notePath);
-        const archivePath = path.join(VAULT_KMW_PATH, "Archive");
+        const archivePath = path.join(VAULT_KMW_PATH, CONFIG.archiveFolder);
         const archiveFilePath = path.join(archivePath, fileName);
 
         // Ensure Archive folder exists
@@ -1225,19 +1419,21 @@ server.tool(
           const newFileName = `${baseName}-${timestamp}${ext}`;
           const newArchiveFilePath = path.join(archivePath, newFileName);
           await fs.rename(fullPath, newArchiveFilePath);
+          invalidateCache();
           return {
             content: [{
               type: "text" as const,
-              text: `Archived: ${notePath} → Archive/${newFileName}`,
+              text: `Archived: ${notePath} → ${CONFIG.archiveFolder}/${newFileName}`,
             }]
           };
         } catch {
           // File doesn't exist in archive, proceed normally
           await fs.rename(fullPath, archiveFilePath);
+          invalidateCache();
           return {
             content: [{
               type: "text" as const,
-              text: `Archived: ${notePath} → Archive/${fileName}`,
+              text: `Archived: ${notePath} → ${CONFIG.archiveFolder}/${fileName}`,
             }]
           };
         }
@@ -1279,7 +1475,7 @@ server.tool(
         };
       }
 
-      const dailyFolder = path.join(searchPath, "Daily");
+      const dailyFolder = path.join(searchPath, CONFIG.dailyFolder);
       const fileName = `${targetDate}.md`;
       const fullPath = path.join(dailyFolder, fileName);
 
@@ -1346,12 +1542,15 @@ server.tool(
 
       await fs.writeFile(fullPath, newFileContent, 'utf-8');
 
+      // Invalidate cache since vault structure may have changed
+      invalidateCache();
+
       return {
         content: [{
           type: "text" as const,
           text: isNew
-            ? `Created daily note: Daily/${fileName}`
-            : `Updated daily note: Daily/${fileName}`,
+            ? `Created daily note: ${CONFIG.dailyFolder}/${fileName}`
+            : `Updated daily note: ${CONFIG.dailyFolder}/${fileName}`,
         }]
       };
     } catch (error) {
@@ -1542,6 +1741,9 @@ server.tool(
 
       // Move the file
       await fs.rename(sourcePath, destPath);
+
+      // Invalidate cache since vault structure changed
+      invalidateCache();
 
       return {
         content: [{
