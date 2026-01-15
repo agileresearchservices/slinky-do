@@ -4,6 +4,9 @@ import {
   parseFrontmatter,
   fixMalformedDate,
   isPathWithinVault,
+  getTimeAgo,
+  getNoteNameFromPath,
+  extractWikilinks,
 } from './index.js';
 
 // Tests for parseTodos
@@ -242,5 +245,98 @@ describe('Filename generation', () => {
       .replace(/^-|-$/g, "") + ".md";
 
     expect(filename).toBe('note-with-spaces.md');
+  });
+});
+
+// Tests for getTimeAgo
+
+describe('getTimeAgo', () => {
+  it('should return "just now" for very recent times', () => {
+    const now = new Date();
+    expect(getTimeAgo(now)).toBe('just now');
+  });
+
+  it('should return minutes ago', () => {
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+    expect(getTimeAgo(fiveMinutesAgo)).toBe('5 minutes ago');
+  });
+
+  it('should return singular minute', () => {
+    const oneMinuteAgo = new Date(Date.now() - 1 * 60 * 1000);
+    expect(getTimeAgo(oneMinuteAgo)).toBe('1 minute ago');
+  });
+
+  it('should return hours ago', () => {
+    const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    expect(getTimeAgo(threeHoursAgo)).toBe('3 hours ago');
+  });
+
+  it('should return yesterday', () => {
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    expect(getTimeAgo(yesterday)).toBe('yesterday');
+  });
+
+  it('should return days ago', () => {
+    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    expect(getTimeAgo(threeDaysAgo)).toBe('3 days ago');
+  });
+
+  it('should return weeks ago', () => {
+    const twoWeeksAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
+    expect(getTimeAgo(twoWeeksAgo)).toBe('2 weeks ago');
+  });
+});
+
+// Tests for getNoteNameFromPath
+
+describe('getNoteNameFromPath', () => {
+  it('should extract note name from simple filename', () => {
+    expect(getNoteNameFromPath('my-note.md')).toBe('my-note');
+  });
+
+  it('should extract note name from path with folders', () => {
+    expect(getNoteNameFromPath('Customers/Gartner/meeting-notes.md')).toBe('meeting-notes');
+  });
+
+  it('should handle path without extension', () => {
+    expect(getNoteNameFromPath('my-note')).toBe('my-note');
+  });
+
+  it('should handle nested paths', () => {
+    expect(getNoteNameFromPath('a/b/c/deep-note.md')).toBe('deep-note');
+  });
+});
+
+// Tests for extractWikilinks
+
+describe('extractWikilinks', () => {
+  it('should extract simple wikilinks', () => {
+    const content = 'Check out [[my-note]] for more info.';
+    expect(extractWikilinks(content)).toEqual(['my-note']);
+  });
+
+  it('should extract multiple wikilinks', () => {
+    const content = 'See [[note-1]] and [[note-2]] and [[note-3]].';
+    expect(extractWikilinks(content)).toEqual(['note-1', 'note-2', 'note-3']);
+  });
+
+  it('should handle wikilinks with aliases', () => {
+    const content = 'Check out [[my-note|My Custom Title]] for info.';
+    expect(extractWikilinks(content)).toEqual(['my-note']);
+  });
+
+  it('should handle wikilinks with paths', () => {
+    const content = 'See [[Customers/Gartner/meeting]] for details.';
+    expect(extractWikilinks(content)).toEqual(['Customers/Gartner/meeting']);
+  });
+
+  it('should return empty array when no wikilinks', () => {
+    const content = 'Just plain text with no links.';
+    expect(extractWikilinks(content)).toEqual([]);
+  });
+
+  it('should handle mixed wikilinks with and without aliases', () => {
+    const content = '[[note-1]] and [[note-2|Alias]] and [[folder/note-3]]';
+    expect(extractWikilinks(content)).toEqual(['note-1', 'note-2', 'folder/note-3']);
   });
 });

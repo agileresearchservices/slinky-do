@@ -317,6 +317,105 @@ function getTimeAgo(date: Date): string {
   return date.toLocaleDateString();
 }
 
+// Extract note name from path (without extension)
+function getNoteNameFromPath(notePath: string): string {
+  return path.basename(notePath, '.md');
+}
+
+// Find all wikilinks in content - returns array of link targets
+function extractWikilinks(content: string): string[] {
+  const wikiLinkRegex = /\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g;
+  const links: string[] = [];
+  let match;
+  while ((match = wikiLinkRegex.exec(content)) !== null) {
+    links.push(match[1]);
+  }
+  return links;
+}
+
+// Find all notes that link to a given note name
+async function findBacklinks(
+  vaultPath: string,
+  targetNoteName: string
+): Promise<Array<{ file: string; title: string; linkCount: number }>> {
+  const backlinks: Array<{ file: string; title: string; linkCount: number }> = [];
+  const targetLower = targetNoteName.toLowerCase();
+
+  async function searchDir(dir: string): Promise<void> {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+
+      const fullPath = path.join(dir, entry.name);
+
+      if (entry.isDirectory()) {
+        await searchDir(fullPath);
+      } else if (entry.name.endsWith('.md')) {
+        try {
+          const content = await fs.readFile(fullPath, 'utf-8');
+          const links = extractWikilinks(content);
+          const matchingLinks = links.filter(link =>
+            link.toLowerCase() === targetLower ||
+            link.toLowerCase().endsWith('/' + targetLower)
+          );
+
+          if (matchingLinks.length > 0) {
+            const parsed = parseFrontmatter(content);
+            const relativePath = path.relative(vaultPath, fullPath);
+            const title = parsed?.frontmatter?.title || entry.name.replace('.md', '');
+
+            backlinks.push({
+              file: relativePath,
+              title,
+              linkCount: matchingLinks.length,
+            });
+          }
+        } catch {
+          // Skip files that can't be read
+        }
+      }
+    }
+  }
+
+  await searchDir(vaultPath);
+  return backlinks;
+}
+
+// Update wikilinks in a file from old name to new name
+async function updateWikilinksInFile(
+  filePath: string,
+  oldNoteName: string,
+  newNoteName: string
+): Promise<boolean> {
+  try {
+    const content = await fs.readFile(filePath, 'utf-8');
+    const oldLower = oldNoteName.toLowerCase();
+
+    // Match wikilinks with the old note name (case-insensitive)
+    // Handles: [[notename]], [[notename|alias]], [[folder/notename]]
+    const wikiLinkRegex = new RegExp(
+      `\\[\\[([^\\]|]*?)(${oldNoteName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})(\\|[^\\]]+)?\\]\\]`,
+      'gi'
+    );
+
+    let updated = false;
+    const newContent = content.replace(wikiLinkRegex, (match, prefix, name, alias) => {
+      updated = true;
+      const newLink = `[[${prefix || ''}${newNoteName}${alias || ''}]]`;
+      return newLink;
+    });
+
+    if (updated) {
+      await fs.writeFile(filePath, newContent, 'utf-8');
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 // Get cached vault stats or scan if cache is stale
 async function getCachedVaultStats(vaultPath: string): Promise<VaultStats> {
   if (isCacheValid() && vaultCache.stats) {
@@ -1671,21 +1770,75 @@ server.tool(
   }
 );
 
+// Tool: get_backlinks
+server.tool(
+  "get_backlinks",
+  "Find all notes that contain wikilinks ([[note-name]]) pointing to a specific note",
+  {
+    note: z.string().min(1).describe("Note name or path to find backlinks for (e.g., 'my-note' or 'Inbox/my-note.md')"),
+  },
+  async ({ note }) => {
+    try {
+      // Extract just the note name (without path and extension)
+      const noteName = getNoteNameFromPath(note);
+
+      const backlinks = await findBacklinks(VAULT_KMW_PATH, noteName);
+
+      if (backlinks.length === 0) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `No backlinks found for "${noteName}".\n\nNo other notes contain [[${noteName}]] wikilinks.`,
+          }]
+        };
+      }
+
+      // Sort by link count (most links first)
+      backlinks.sort((a, b) => b.linkCount - a.linkCount);
+
+      let responseText = `## Backlinks for "${noteName}"\n\n`;
+      responseText += `Found ${backlinks.length} note(s) linking to this note:\n\n`;
+
+      backlinks.forEach((link, i) => {
+        responseText += `${i + 1}. **${link.title}**\n`;
+        responseText += `   ${link.file}\n`;
+        responseText += `   ${link.linkCount} link${link.linkCount > 1 ? 's' : ''}\n\n`;
+      });
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: responseText.trim()
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error finding backlinks: ${error instanceof Error ? error.message : "Unknown error"}`,
+        }],
+        isError: true,
+      };
+    }
+  }
+);
+
 // Tool: move_note
 server.tool(
   "move_note",
-  "Move a note to a different folder within the vault",
+  "Move a note to a different folder within the vault. Can optionally update wikilinks in other notes that reference this note.",
   {
     source: z.string().min(1).describe("Current relative path to the note"),
     destination: z.string().min(1).describe("Destination folder (e.g., 'Customers/Gartner/Technical' or 'Archive')"),
-    updateLinks: z.boolean().optional().describe("Update wikilinks in other notes (default: true) - NOT YET IMPLEMENTED"),
+    updateLinks: z.boolean().optional().describe("Update wikilinks in other notes to reflect the new location (default: false)"),
   },
-  async ({ source, destination }) => {
+  async ({ source, destination, updateLinks }) => {
     try {
       const sourcePath = path.join(VAULT_KMW_PATH, source);
       const fileName = path.basename(source);
       const destFolder = path.join(VAULT_KMW_PATH, destination);
       const destPath = path.join(destFolder, fileName);
+      const noteName = getNoteNameFromPath(source);
 
       // Validate source path stays within vault
       if (!isPathWithinVault(sourcePath)) {
@@ -1742,13 +1895,51 @@ server.tool(
       // Move the file
       await fs.rename(sourcePath, destPath);
 
+      // Update wikilinks if requested
+      let linksUpdated = 0;
+      if (updateLinks) {
+        // Find all notes that link to the moved note
+        const backlinks = await findBacklinks(VAULT_KMW_PATH, noteName);
+
+        // Update links in each file (the note name stays the same, just location changes)
+        // For Obsidian, simple [[notename]] links still work after move
+        // But if notes use full paths like [[folder/notename]], we need to update them
+        const oldPathPrefix = path.dirname(source);
+        const newPathPrefix = destination;
+
+        for (const backlink of backlinks) {
+          const backlinkPath = path.join(VAULT_KMW_PATH, backlink.file);
+          try {
+            const content = await fs.readFile(backlinkPath, 'utf-8');
+            // Update full path links like [[OldFolder/notename]] to [[NewFolder/notename]]
+            const oldFullPath = oldPathPrefix !== '.' ? `${oldPathPrefix}/${noteName}` : noteName;
+            const newFullPath = `${newPathPrefix}/${noteName}`;
+
+            if (content.includes(`[[${oldFullPath}]]`) || content.includes(`[[${oldFullPath}|`)) {
+              const updatedContent = content
+                .replace(new RegExp(`\\[\\[${oldFullPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\]\\]`, 'g'), `[[${newFullPath}]]`)
+                .replace(new RegExp(`\\[\\[${oldFullPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\|`, 'g'), `[[${newFullPath}|`);
+              await fs.writeFile(backlinkPath, updatedContent, 'utf-8');
+              linksUpdated++;
+            }
+          } catch {
+            // Skip files that can't be updated
+          }
+        }
+      }
+
       // Invalidate cache since vault structure changed
       invalidateCache();
+
+      let responseText = `Moved: ${source} → ${destination}/${fileName}`;
+      if (updateLinks) {
+        responseText += `\nUpdated ${linksUpdated} file(s) with path-based wikilinks.`;
+      }
 
       return {
         content: [{
           type: "text" as const,
-          text: `Moved: ${source} → ${destination}/${fileName}`,
+          text: responseText,
         }]
       };
     } catch (error) {
@@ -1784,6 +1975,9 @@ export {
   inferMetadataFromPath,
   inferTagsFromContent,
   mergeFrontmatter,
+  getTimeAgo,
+  getNoteNameFromPath,
+  extractWikilinks,
 };
 
 export type { TodoItem, InferredMetadata, VaultStats };
