@@ -102,7 +102,7 @@ Restart Claude Desktop after saving.
 
 ## Git Workflow
 
-Always use `/document-commit` for any git-related activities (committing, pushing changes).
+Use standard git commands via Bash tool for committing and pushing changes.
 
 ## Security Best Practices
 
@@ -134,11 +134,10 @@ Use these slash commands for specialized assistance:
 
 | Skill | Description |
 |-------|-------------|
-| `/mcp-expert` | **Recommended** - Expert in MCP server development, tool design, debugging, and deployment |
-| `/document-commit` | Commit and push changes with clear messages |
-| `/security-expert` | Security hardening and vulnerability scanning |
-| `/langchain-expert` | LangChain/LangGraph integration if adding AI features |
-| `/opensearch-expert` | OpenSearch integration if adding search backend |
-| `/web-designer` | UI design if adding a web interface |
-| `/code-reviewer` | Comprehensive code review for logic, quality, performance, security, maintainability |
-| `/resume-expert` | Resume writing, optimization, and ATS tailoring |
+| `langchain-expert` | Expert in LangChain, LangGraph, and LangSmith technologies |
+| `opensearch-expert` | Expert in OpenSearch Query DSL, query optimization, search relevancy |
+| `resume-expert` | Expert resume writing, optimization, and ATS tailoring |
+| `web-designer` | Expert web designer specializing in UI design and responsive design |
+| `code-review:code-review` | Comprehensive code review for logic, quality, performance, security |
+| `agent-sdk-dev:new-sdk-app` | Create and setup new Claude Agent SDK applications |
+| `pr-review-toolkit:review-pr` | Comprehensive PR review using specialized agents |

@@ -10,8 +10,23 @@ import * as yaml from "js-yaml";
 // Configuration
 const VAULT_PATH = process.env.OBSIDIAN_VAULT_PATH ||
   "/Users/kevin/Library/Mobile Documents/iCloud~md~obsidian/Documents/KMW";
-const TODO_FILE = path.join(VAULT_PATH, "KMW/TODO.md");
-const DEFAULT_INBOX = "Inbox";
+
+// Configurable folder names (can be overridden via environment variables)
+const CONFIG = {
+  // Relative path to TODO file from KMW folder
+  todoFile: process.env.SLINKY_TODO_FILE || "KMW/TODO.md",
+  // Default folder for new notes
+  inboxFolder: process.env.SLINKY_INBOX_FOLDER || "Inbox",
+  // Archive folder for deleted notes
+  archiveFolder: process.env.SLINKY_ARCHIVE_FOLDER || "Archive",
+  // Daily notes folder
+  dailyFolder: process.env.SLINKY_DAILY_FOLDER || "Daily",
+  // Cache TTL for vault stats in milliseconds (default: 30 seconds)
+  cacheTtlMs: parseInt(process.env.SLINKY_CACHE_TTL_MS || "30000", 10),
+} as const;
+
+const TODO_FILE = path.join(VAULT_PATH, CONFIG.todoFile);
+const DEFAULT_INBOX = CONFIG.inboxFolder;
 
 // Types for vault enrichment
 interface InferredMetadata {
@@ -39,10 +54,32 @@ interface TodoItem {
   completed: boolean;
   tags: string[];
   line: number;
+  indent: number;
 }
 
 // Derived paths
 const VAULT_KMW_PATH = path.join(VAULT_PATH, "KMW");
+
+// Vault stats cache
+interface VaultStatsCache {
+  stats: VaultStats | null;
+  timestamp: number;
+}
+
+const vaultCache: VaultStatsCache = {
+  stats: null,
+  timestamp: 0,
+};
+
+function isCacheValid(): boolean {
+  return vaultCache.stats !== null &&
+         (Date.now() - vaultCache.timestamp) < CONFIG.cacheTtlMs;
+}
+
+function invalidateCache(): void {
+  vaultCache.stats = null;
+  vaultCache.timestamp = 0;
+}
 
 // Path validation helper - ensures paths stay within vault
 function isPathWithinVault(targetPath: string, vaultBase: string = VAULT_KMW_PATH): boolean {
@@ -264,17 +301,232 @@ async function scanVault(vaultPath: string): Promise<VaultStats> {
   return stats;
 }
 
+// Human-readable time ago string
+function getTimeAgo(date: Date): string {
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+
+  if (diffMins < 1) return 'just now';
+  if (diffMins < 60) return `${diffMins} minute${diffMins === 1 ? '' : 's'} ago`;
+  if (diffHours < 24) return `${diffHours} hour${diffHours === 1 ? '' : 's'} ago`;
+  if (diffDays === 1) return 'yesterday';
+  if (diffDays < 7) return `${diffDays} days ago`;
+  if (diffDays < 30) return `${Math.floor(diffDays / 7)} week${Math.floor(diffDays / 7) === 1 ? '' : 's'} ago`;
+  return date.toLocaleDateString();
+}
+
+// Extract note name from path (without extension)
+function getNoteNameFromPath(notePath: string): string {
+  return path.basename(notePath, '.md');
+}
+
+// Find all wikilinks in content - returns array of link targets
+function extractWikilinks(content: string): string[] {
+  const wikiLinkRegex = /\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g;
+  const links: string[] = [];
+  let match;
+  while ((match = wikiLinkRegex.exec(content)) !== null) {
+    links.push(match[1]);
+  }
+  return links;
+}
+
+// Find all notes that link to a given note name
+async function findBacklinks(
+  vaultPath: string,
+  targetNoteName: string
+): Promise<Array<{ file: string; title: string; linkCount: number }>> {
+  const backlinks: Array<{ file: string; title: string; linkCount: number }> = [];
+  const targetLower = targetNoteName.toLowerCase();
+
+  async function searchDir(dir: string): Promise<void> {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+
+      const fullPath = path.join(dir, entry.name);
+
+      if (entry.isDirectory()) {
+        await searchDir(fullPath);
+      } else if (entry.name.endsWith('.md')) {
+        try {
+          const content = await fs.readFile(fullPath, 'utf-8');
+          const links = extractWikilinks(content);
+          const matchingLinks = links.filter(link =>
+            link.toLowerCase() === targetLower ||
+            link.toLowerCase().endsWith('/' + targetLower)
+          );
+
+          if (matchingLinks.length > 0) {
+            const parsed = parseFrontmatter(content);
+            const relativePath = path.relative(vaultPath, fullPath);
+            const title = parsed?.frontmatter?.title || entry.name.replace('.md', '');
+
+            backlinks.push({
+              file: relativePath,
+              title,
+              linkCount: matchingLinks.length,
+            });
+          }
+        } catch {
+          // Skip files that can't be read
+        }
+      }
+    }
+  }
+
+  await searchDir(vaultPath);
+  return backlinks;
+}
+
+// Update wikilinks in a file from old name to new name
+async function updateWikilinksInFile(
+  filePath: string,
+  oldNoteName: string,
+  newNoteName: string
+): Promise<boolean> {
+  try {
+    const content = await fs.readFile(filePath, 'utf-8');
+    const oldLower = oldNoteName.toLowerCase();
+
+    // Match wikilinks with the old note name (case-insensitive)
+    // Handles: [[notename]], [[notename|alias]], [[folder/notename]]
+    const wikiLinkRegex = new RegExp(
+      `\\[\\[([^\\]|]*?)(${oldNoteName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})(\\|[^\\]]+)?\\]\\]`,
+      'gi'
+    );
+
+    let updated = false;
+    const newContent = content.replace(wikiLinkRegex, (match, prefix, name, alias) => {
+      updated = true;
+      const newLink = `[[${prefix || ''}${newNoteName}${alias || ''}]]`;
+      return newLink;
+    });
+
+    if (updated) {
+      await fs.writeFile(filePath, newContent, 'utf-8');
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+// Build a set of all note names in the vault (for link validation)
+async function getAllNoteNames(vaultPath: string): Promise<Set<string>> {
+  const noteNames = new Set<string>();
+
+  async function scanDir(dir: string): Promise<void> {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+
+      const fullPath = path.join(dir, entry.name);
+
+      if (entry.isDirectory()) {
+        await scanDir(fullPath);
+      } else if (entry.name.endsWith('.md')) {
+        // Add both the full relative path and just the note name
+        const relativePath = path.relative(vaultPath, fullPath);
+        const noteName = entry.name.replace('.md', '');
+        noteNames.add(noteName.toLowerCase());
+        noteNames.add(relativePath.replace('.md', '').toLowerCase());
+      }
+    }
+  }
+
+  await scanDir(vaultPath);
+  return noteNames;
+}
+
+// Check if a wikilink target exists in the vault
+function isValidWikilink(linkTarget: string, validNotes: Set<string>): boolean {
+  const targetLower = linkTarget.toLowerCase();
+  // Check if it matches any note name (with or without path)
+  if (validNotes.has(targetLower)) return true;
+  // Check just the note name part (last segment of path)
+  const noteName = targetLower.split('/').pop() || targetLower;
+  return validNotes.has(noteName);
+}
+
+// Find all broken wikilinks in the vault
+async function findBrokenLinks(
+  vaultPath: string
+): Promise<Array<{ file: string; title: string; brokenLinks: string[] }>> {
+  const validNotes = await getAllNoteNames(vaultPath);
+  const brokenLinkResults: Array<{ file: string; title: string; brokenLinks: string[] }> = [];
+
+  async function scanDir(dir: string): Promise<void> {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+
+      const fullPath = path.join(dir, entry.name);
+
+      if (entry.isDirectory()) {
+        await scanDir(fullPath);
+      } else if (entry.name.endsWith('.md')) {
+        try {
+          const content = await fs.readFile(fullPath, 'utf-8');
+          const links = extractWikilinks(content);
+          const brokenLinks = links.filter(link => !isValidWikilink(link, validNotes));
+
+          if (brokenLinks.length > 0) {
+            const parsed = parseFrontmatter(content);
+            const relativePath = path.relative(vaultPath, fullPath);
+            const title = parsed?.frontmatter?.title || entry.name.replace('.md', '');
+
+            brokenLinkResults.push({
+              file: relativePath,
+              title,
+              brokenLinks,
+            });
+          }
+        } catch {
+          // Skip files that can't be read
+        }
+      }
+    }
+  }
+
+  await scanDir(vaultPath);
+  return brokenLinkResults;
+}
+
+// Get cached vault stats or scan if cache is stale
+async function getCachedVaultStats(vaultPath: string): Promise<VaultStats> {
+  if (isCacheValid() && vaultCache.stats) {
+    return vaultCache.stats;
+  }
+
+  const stats = await scanVault(vaultPath);
+  vaultCache.stats = stats;
+  vaultCache.timestamp = Date.now();
+  return stats;
+}
+
 // Parse TODO.md into structured items
 function parseTodos(content: string): TodoItem[] {
   const todos: TodoItem[] = [];
   const lines = content.split('\n');
 
   lines.forEach((line, index) => {
-    // Match: - [ ] or - [x] followed by optional tags and text
-    const match = line.match(/^-\s*\[([ xX])\]\s*(.*)$/);
+    // Match: optional whitespace, then - [ ] or - [x] followed by optional tags and text
+    const match = line.match(/^(\s*)-\s*\[([ xX])\]\s*(.*)$/);
     if (match) {
-      const completed = match[1].toLowerCase() === 'x';
-      const rest = match[2];
+      const leadingWhitespace = match[1];
+      const completed = match[2].toLowerCase() === 'x';
+      const rest = match[3];
+
+      // Calculate indent level (count of leading whitespace characters)
+      const indent = leadingWhitespace.length;
 
       // Extract tags (words starting with #)
       const tagMatches = rest.match(/#\w+/g) || [];
@@ -289,6 +541,7 @@ function parseTodos(content: string): TodoItem[] {
         completed,
         tags,
         line: index + 1, // 1-indexed line number
+        indent,
       });
     }
   });
@@ -427,6 +680,9 @@ tags: [${tagsArray.map(t => `"${t}"`).join(", ")}]
       // Write file
       await fs.writeFile(filepath, noteContent, "utf-8");
 
+      // Invalidate cache since vault structure changed
+      invalidateCache();
+
       return {
         content: [
           {
@@ -558,18 +814,26 @@ server.tool(
 // Tool: get_vault_info (dynamic scanning)
 server.tool(
   "get_vault_info",
-  "Get real-time information about the vault structure, available tags, properties, and statistics by scanning the actual vault",
+  "Get real-time information about the vault structure, available tags, properties, and statistics. Results are cached for 30 seconds - use refresh=true to force a fresh scan.",
   {
     section: z.enum(["all", "tags", "properties", "folders", "stats"]).optional()
-      .describe("Which section to return (defaults to 'all')")
+      .describe("Which section to return (defaults to 'all')"),
+    refresh: z.boolean().optional()
+      .describe("Force a fresh vault scan, ignoring cache (default: false)")
   },
-  async ({ section }) => {
+  async ({ section, refresh }) => {
     try {
       const infoSection = section || "all";
       const searchPath = VAULT_KMW_PATH;
 
-      // Scan the vault dynamically
-      const stats = await scanVault(searchPath);
+      // Invalidate cache if refresh requested
+      if (refresh) {
+        invalidateCache();
+      }
+
+      // Get vault stats (cached or fresh)
+      const wasCached = isCacheValid();
+      const stats = await getCachedVaultStats(searchPath);
 
       let responseText = "";
 
@@ -649,6 +913,11 @@ server.tool(
         });
       }
 
+      // Add cache status indicator
+      const cacheAge = Date.now() - vaultCache.timestamp;
+      const cacheAgeSeconds = Math.round(cacheAge / 1000);
+      responseText += `\n---\n*${wasCached ? `Cached (${cacheAgeSeconds}s ago)` : "Fresh scan"} - use refresh=true to force update*`;
+
       return {
         content: [{
           type: "text" as const,
@@ -669,44 +938,185 @@ server.tool(
   }
 );
 
+// Tool: get_recent_notes
+server.tool(
+  "get_recent_notes",
+  "List notes that were recently modified, sorted by modification time (most recent first)",
+  {
+    days: z.number().int().positive().max(365).optional()
+      .describe("Number of days to look back (default: 7)"),
+    limit: z.number().int().positive().max(100).optional()
+      .describe("Maximum number of notes to return (default: 20)"),
+  },
+  async ({ days, limit }) => {
+    try {
+      const lookbackDays = days || 7;
+      const maxResults = limit || 20;
+      const searchPath = VAULT_KMW_PATH;
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - lookbackDays);
+
+      const results: Array<{
+        file: string;
+        title: string;
+        modified: Date;
+        tags: string[];
+      }> = [];
+
+      async function searchDir(dir: string): Promise<void> {
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+
+        for (const entry of entries) {
+          if (entry.name.startsWith('.')) continue;
+
+          const fullPath = path.join(dir, entry.name);
+
+          if (entry.isDirectory()) {
+            await searchDir(fullPath);
+          } else if (entry.name.endsWith('.md')) {
+            try {
+              const stats = await fs.stat(fullPath);
+              if (stats.mtime >= cutoffDate) {
+                const content = await fs.readFile(fullPath, 'utf-8');
+                const parsed = parseFrontmatter(content);
+                const relativePath = path.relative(searchPath, fullPath);
+                const title = parsed?.frontmatter?.title || entry.name.replace('.md', '');
+                const tags = parsed?.frontmatter?.tags || [];
+
+                results.push({
+                  file: relativePath,
+                  title,
+                  modified: stats.mtime,
+                  tags: Array.isArray(tags) ? tags : [],
+                });
+              }
+            } catch {
+              // Skip files that can't be read
+            }
+          }
+        }
+      }
+
+      await searchDir(searchPath);
+
+      // Sort by modification time (most recent first)
+      results.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+
+      // Limit results
+      const limited = results.slice(0, maxResults);
+
+      if (limited.length === 0) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `No notes modified in the last ${lookbackDays} day(s).`,
+          }]
+        };
+      }
+
+      let responseText = `## Recently Modified Notes\n\n`;
+      responseText += `Found ${limited.length} note(s) modified in the last ${lookbackDays} day(s)`;
+      if (results.length > maxResults) {
+        responseText += ` (showing ${maxResults} of ${results.length})`;
+      }
+      responseText += `:\n\n`;
+
+      limited.forEach((r, i) => {
+        const timeAgo = getTimeAgo(r.modified);
+        const tagStr = r.tags.length > 0 ? ` [${r.tags.slice(0, 3).join(', ')}${r.tags.length > 3 ? '...' : ''}]` : '';
+        responseText += `${i + 1}. **${r.title}**${tagStr}\n`;
+        responseText += `   ${r.file}\n`;
+        responseText += `   *${timeAgo}*\n\n`;
+      });
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: responseText.trim()
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error getting recent notes: ${error instanceof Error ? error.message : "Unknown error"}`,
+        }],
+        isError: true,
+      };
+    }
+  }
+);
+
 // Tool: enrich_vault
 server.tool(
   "enrich_vault",
-  "Enrich all markdown files in the vault with intelligent YAML frontmatter, metadata, and tags inferred from folder structure and content. Merges with existing frontmatter without overwriting user edits.",
-  {},
-  async () => {
+  "Enrich markdown files with intelligent YAML frontmatter inferred from folder structure and content. Only writes files when changes are detected.",
+  {
+    dryRun: z.boolean().optional().describe("Preview changes without writing files (default: false)"),
+    folder: z.string().optional().describe("Only process files in this folder (e.g., 'Customers/Gartner')"),
+    force: z.boolean().optional().describe("Process all files even if they already have frontmatter (default: false)"),
+  },
+  async ({ dryRun, folder, force }) => {
     try {
-      const searchPath = VAULT_KMW_PATH;
-      let processed = 0;
-      let enhanced = 0;
+      const isDryRun = dryRun === true;
+      const forceAll = force === true;
+      const targetFolder = folder ? path.join(VAULT_KMW_PATH, folder) : VAULT_KMW_PATH;
+
+      // Validate folder path
+      if (folder && !isPathWithinVault(targetFolder)) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Error: Folder must be within the vault",
+          }],
+          isError: true,
+        };
+      }
+
+      let scanned = 0;
+      let modified = 0;
+      let skipped = 0;
       let datesFixed = 0;
+      const changes: string[] = [];
       const errors: string[] = [];
 
       // Recursive function to process files
       async function processDir(dir: string): Promise<void> {
-        const entries = await fs.readdir(dir, { withFileTypes: true });
+        let entries;
+        try {
+          entries = await fs.readdir(dir, { withFileTypes: true });
+        } catch {
+          return; // Folder doesn't exist or can't be read
+        }
 
         for (const entry of entries) {
           const fullPath = path.join(dir, entry.name);
 
-          // Skip .obsidian folder
+          // Skip .obsidian folder and hidden files
           if (entry.name.startsWith('.')) continue;
 
           if (entry.isDirectory()) {
             await processDir(fullPath);
           } else if (entry.name.endsWith('.md')) {
+            scanned++;
             try {
               // Read file content
               const content = await fs.readFile(fullPath, 'utf-8');
-              const relativePath = path.relative(searchPath, fullPath);
-
-              // Infer metadata from path
-              const inferred = inferMetadataFromPath(relativePath, entry.name);
+              const relativePath = path.relative(VAULT_KMW_PATH, fullPath);
 
               // Parse existing frontmatter
               const parsed = parseFrontmatter(content);
               const existingFm = parsed?.frontmatter || {};
               const body = parsed?.body || content;
+
+              // Skip files that already have complete frontmatter (unless force)
+              if (!forceAll && parsed?.frontmatter && existingFm.title && existingFm.tags) {
+                skipped++;
+                continue;
+              }
+
+              // Infer metadata from path
+              const inferred = inferMetadataFromPath(relativePath, entry.name);
 
               // Infer tags from content
               const contentTags = inferTagsFromContent(body, inferred.tags);
@@ -715,26 +1125,45 @@ server.tool(
               // Merge frontmatter
               let mergedFm = mergeFrontmatter(existingFm, inferred);
 
-              // Fix malformed dates
+              // Track if date was fixed
+              let dateWasFixed = false;
               if (mergedFm.date) {
                 const originalDate = mergedFm.date;
                 mergedFm.date = fixMalformedDate(mergedFm.date, entry.name);
                 if (mergedFm.date !== originalDate) {
-                  datesFixed++;
+                  dateWasFixed = true;
                 }
               }
 
-              // Generate YAML frontmatter
+              // Generate new content
               const yamlStr = yaml.dump(mergedFm, { sortKeys: true, lineWidth: -1 });
               const newContent = `---\n${yamlStr}---\n\n${body}`;
 
-              // Write file
-              await fs.writeFile(fullPath, newContent, 'utf-8');
-
-              processed++;
-              if (!parsed) {
-                enhanced++; // File didn't have frontmatter before
+              // Check if content actually changed
+              if (newContent === content) {
+                skipped++;
+                continue;
               }
+
+              // Track changes
+              const changeDetails: string[] = [];
+              if (!parsed) changeDetails.push('added frontmatter');
+              if (dateWasFixed) {
+                changeDetails.push('fixed date');
+                datesFixed++;
+              }
+              if (existingFm.tags?.length !== mergedFm.tags?.length) {
+                changeDetails.push('added tags');
+              }
+
+              changes.push(`${relativePath}: ${changeDetails.join(', ') || 'updated metadata'}`);
+
+              // Write file (unless dry run)
+              if (!isDryRun) {
+                await fs.writeFile(fullPath, newContent, 'utf-8');
+              }
+              modified++;
+
             } catch (error) {
               errors.push(`${entry.name}: ${error instanceof Error ? error.message : 'Unknown error'}`);
             }
@@ -742,25 +1171,56 @@ server.tool(
         }
       }
 
-      await processDir(searchPath);
+      await processDir(targetFolder);
 
-      let summary = `## Vault Enrichment Complete\n\n`;
-      summary += `- **Processed**: ${processed} markdown files\n`;
-      summary += `- **Enhanced**: ${enhanced} files (added frontmatter)\n`;
-      summary += `- **Dates Fixed**: ${datesFixed} malformed dates corrected\n`;
+      // Build summary
+      let summary = `## Vault Enrichment ${isDryRun ? '(Dry Run)' : 'Complete'}\n\n`;
+      if (folder) {
+        summary += `**Target folder**: ${folder}\n\n`;
+      }
+      summary += `- **Scanned**: ${scanned} markdown files\n`;
+      summary += `- **${isDryRun ? 'Would modify' : 'Modified'}**: ${modified} files\n`;
+      summary += `- **Skipped**: ${skipped} files (already enriched or unchanged)\n`;
+      if (datesFixed > 0) {
+        summary += `- **Dates fixed**: ${datesFixed}\n`;
+      }
+
+      if (changes.length > 0 && changes.length <= 20) {
+        summary += `\n### ${isDryRun ? 'Files to be modified' : 'Modified files'}:\n`;
+        changes.forEach(c => {
+          summary += `- ${c}\n`;
+        });
+      } else if (changes.length > 20) {
+        summary += `\n### ${isDryRun ? 'Files to be modified' : 'Modified files'} (showing first 20):\n`;
+        changes.slice(0, 20).forEach(c => {
+          summary += `- ${c}\n`;
+        });
+        summary += `- ... and ${changes.length - 20} more\n`;
+      }
 
       if (errors.length > 0) {
-        summary += `\n## Errors (${errors.length})\n\n`;
-        summary += errors.slice(0, 10).map(e => `- ${e}`).join('\n');
-        if (errors.length > 10) {
-          summary += `\n- ... and ${errors.length - 10} more`;
+        summary += `\n### Errors (${errors.length}):\n`;
+        errors.slice(0, 5).forEach(e => {
+          summary += `- ${e}\n`;
+        });
+        if (errors.length > 5) {
+          summary += `- ... and ${errors.length - 5} more\n`;
         }
+      }
+
+      if (isDryRun && modified > 0) {
+        summary += `\n---\n*Run without dryRun=true to apply these changes.*`;
+      }
+
+      // Invalidate cache if we made changes
+      if (!isDryRun && modified > 0) {
+        invalidateCache();
       }
 
       return {
         content: [{
           type: "text" as const,
-          text: summary
+          text: summary.trim()
         }]
       };
     } catch (error) {
@@ -909,8 +1369,9 @@ server.tool(
       if (pending.length > 0 && filterStatus !== "completed") {
         responseText += `### Pending (${pending.length})\n\n`;
         pending.forEach(todo => {
+          const indentStr = '  '.repeat(todo.indent); // 2 spaces per indent level (1 tab or 1 space = 1 level)
           const tagStr = todo.tags.length > 0 ? ` [${todo.tags.map(t => `#${t}`).join(' ')}]` : '';
-          responseText += `${todo.id}. [ ] ${todo.text}${tagStr}\n`;
+          responseText += `${indentStr}${todo.id}. [ ] ${todo.text}${tagStr}\n`;
         });
         responseText += "\n";
       }
@@ -918,8 +1379,9 @@ server.tool(
       if (completed.length > 0 && filterStatus !== "pending") {
         responseText += `### Completed (${completed.length})\n\n`;
         completed.forEach(todo => {
+          const indentStr = '  '.repeat(todo.indent); // 2 spaces per indent level
           const tagStr = todo.tags.length > 0 ? ` [${todo.tags.map(t => `#${t}`).join(' ')}]` : '';
-          responseText += `${todo.id}. [x] ${todo.text}${tagStr}\n`;
+          responseText += `${indentStr}${todo.id}. [x] ${todo.text}${tagStr}\n`;
         });
       }
 
@@ -1143,6 +1605,9 @@ server.tool(
 
       await fs.writeFile(fullPath, newFileContent, 'utf-8');
 
+      // Invalidate cache since note metadata may have changed
+      invalidateCache();
+
       return {
         content: [{
           type: "text" as const,
@@ -1200,6 +1665,7 @@ server.tool(
       if (permanent) {
         // Permanent deletion
         await fs.unlink(fullPath);
+        invalidateCache();
         return {
           content: [{
             type: "text" as const,
@@ -1209,7 +1675,7 @@ server.tool(
       } else {
         // Move to Archive
         const fileName = path.basename(notePath);
-        const archivePath = path.join(VAULT_KMW_PATH, "Archive");
+        const archivePath = path.join(VAULT_KMW_PATH, CONFIG.archiveFolder);
         const archiveFilePath = path.join(archivePath, fileName);
 
         // Ensure Archive folder exists
@@ -1225,19 +1691,21 @@ server.tool(
           const newFileName = `${baseName}-${timestamp}${ext}`;
           const newArchiveFilePath = path.join(archivePath, newFileName);
           await fs.rename(fullPath, newArchiveFilePath);
+          invalidateCache();
           return {
             content: [{
               type: "text" as const,
-              text: `Archived: ${notePath} → Archive/${newFileName}`,
+              text: `Archived: ${notePath} → ${CONFIG.archiveFolder}/${newFileName}`,
             }]
           };
         } catch {
           // File doesn't exist in archive, proceed normally
           await fs.rename(fullPath, archiveFilePath);
+          invalidateCache();
           return {
             content: [{
               type: "text" as const,
-              text: `Archived: ${notePath} → Archive/${fileName}`,
+              text: `Archived: ${notePath} → ${CONFIG.archiveFolder}/${fileName}`,
             }]
           };
         }
@@ -1279,7 +1747,7 @@ server.tool(
         };
       }
 
-      const dailyFolder = path.join(searchPath, "Daily");
+      const dailyFolder = path.join(searchPath, CONFIG.dailyFolder);
       const fileName = `${targetDate}.md`;
       const fullPath = path.join(dailyFolder, fileName);
 
@@ -1346,12 +1814,15 @@ server.tool(
 
       await fs.writeFile(fullPath, newFileContent, 'utf-8');
 
+      // Invalidate cache since vault structure may have changed
+      invalidateCache();
+
       return {
         content: [{
           type: "text" as const,
           text: isNew
-            ? `Created daily note: Daily/${fileName}`
-            : `Updated daily note: Daily/${fileName}`,
+            ? `Created daily note: ${CONFIG.dailyFolder}/${fileName}`
+            : `Updated daily note: ${CONFIG.dailyFolder}/${fileName}`,
         }]
       };
     } catch (error) {
@@ -1472,21 +1943,278 @@ server.tool(
   }
 );
 
+// Tool: get_backlinks
+server.tool(
+  "get_backlinks",
+  "Find all notes that contain wikilinks ([[note-name]]) pointing to a specific note",
+  {
+    note: z.string().min(1).describe("Note name or path to find backlinks for (e.g., 'my-note' or 'Inbox/my-note.md')"),
+  },
+  async ({ note }) => {
+    try {
+      // Extract just the note name (without path and extension)
+      const noteName = getNoteNameFromPath(note);
+
+      const backlinks = await findBacklinks(VAULT_KMW_PATH, noteName);
+
+      if (backlinks.length === 0) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `No backlinks found for "${noteName}".\n\nNo other notes contain [[${noteName}]] wikilinks.`,
+          }]
+        };
+      }
+
+      // Sort by link count (most links first)
+      backlinks.sort((a, b) => b.linkCount - a.linkCount);
+
+      let responseText = `## Backlinks for "${noteName}"\n\n`;
+      responseText += `Found ${backlinks.length} note(s) linking to this note:\n\n`;
+
+      backlinks.forEach((link, i) => {
+        responseText += `${i + 1}. **${link.title}**\n`;
+        responseText += `   ${link.file}\n`;
+        responseText += `   ${link.linkCount} link${link.linkCount > 1 ? 's' : ''}\n\n`;
+      });
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: responseText.trim()
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error finding backlinks: ${error instanceof Error ? error.message : "Unknown error"}`,
+        }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool: validate_vault
+server.tool(
+  "validate_vault",
+  "Check the vault for broken wikilinks (links to notes that don't exist) and other consistency issues",
+  {
+    fix: z.boolean().optional().describe("Automatically remove broken links (default: false, just report)"),
+  },
+  async ({ fix }) => {
+    try {
+      const brokenLinks = await findBrokenLinks(VAULT_KMW_PATH);
+
+      if (brokenLinks.length === 0) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "## Vault Validation\n\n✓ No broken wikilinks found. All links point to existing notes.",
+          }]
+        };
+      }
+
+      const totalBroken = brokenLinks.reduce((sum, item) => sum + item.brokenLinks.length, 0);
+      let responseText = `## Vault Validation\n\n`;
+      responseText += `Found ${totalBroken} broken wikilink(s) in ${brokenLinks.length} file(s):\n\n`;
+
+      // Sort by number of broken links (most first)
+      brokenLinks.sort((a, b) => b.brokenLinks.length - a.brokenLinks.length);
+
+      let fixedCount = 0;
+      for (const item of brokenLinks) {
+        responseText += `### ${item.title}\n`;
+        responseText += `File: ${item.file}\n`;
+        responseText += `Broken links:\n`;
+        item.brokenLinks.forEach(link => {
+          responseText += `  - [[${link}]]\n`;
+        });
+        responseText += '\n';
+
+        // Fix broken links if requested
+        if (fix) {
+          const fullPath = path.join(VAULT_KMW_PATH, item.file);
+          try {
+            let content = await fs.readFile(fullPath, 'utf-8');
+            for (const link of item.brokenLinks) {
+              // Remove broken wikilinks, keeping any alias text
+              const escapedLink = link.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              // [[broken|Alias Text]] -> Alias Text
+              // [[broken]] -> broken
+              content = content.replace(
+                new RegExp(`\\[\\[${escapedLink}\\|([^\\]]+)\\]\\]`, 'g'),
+                '$1'
+              );
+              content = content.replace(
+                new RegExp(`\\[\\[${escapedLink}\\]\\]`, 'g'),
+                link.split('/').pop() || link
+              );
+            }
+            await fs.writeFile(fullPath, content, 'utf-8');
+            fixedCount++;
+          } catch {
+            // Skip files that can't be fixed
+          }
+        }
+      }
+
+      if (fix) {
+        responseText += `---\n*Fixed ${fixedCount} file(s) by removing broken wikilinks.*`;
+        invalidateCache();
+      } else {
+        responseText += `---\n*Run with fix=true to remove broken links.*`;
+      }
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: responseText.trim()
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error validating vault: ${error instanceof Error ? error.message : "Unknown error"}`,
+        }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool: rename_note
+server.tool(
+  "rename_note",
+  "Rename a note and optionally update all wikilinks in other notes that reference it",
+  {
+    path: z.string().min(1).describe("Relative path to the note (e.g., 'Inbox/old-name.md')"),
+    newName: z.string().min(1).describe("New name for the note (without .md extension)"),
+    updateLinks: z.boolean().optional().describe("Update wikilinks in other notes (default: true)"),
+  },
+  async ({ path: notePath, newName, updateLinks }) => {
+    try {
+      const shouldUpdateLinks = updateLinks !== false; // Default true
+      const fullPath = path.join(VAULT_KMW_PATH, notePath);
+      const directory = path.dirname(fullPath);
+      const oldName = getNoteNameFromPath(notePath);
+      const newFileName = `${newName}.md`;
+      const newFullPath = path.join(directory, newFileName);
+      const newRelativePath = path.join(path.dirname(notePath), newFileName);
+
+      // Validate paths
+      if (!isPathWithinVault(fullPath)) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Error: Path must be within the vault",
+          }],
+          isError: true,
+        };
+      }
+
+      // Check source exists
+      try {
+        await fs.access(fullPath);
+      } catch {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Note not found: ${notePath}`,
+          }],
+          isError: true,
+        };
+      }
+
+      // Check destination doesn't exist
+      try {
+        await fs.access(newFullPath);
+        return {
+          content: [{
+            type: "text" as const,
+            text: `A note with name "${newName}" already exists in this folder.`,
+          }],
+          isError: true,
+        };
+      } catch {
+        // Good - destination doesn't exist
+      }
+
+      // Rename the file
+      await fs.rename(fullPath, newFullPath);
+
+      // Update the title in frontmatter
+      try {
+        const content = await fs.readFile(newFullPath, 'utf-8');
+        const parsed = parseFrontmatter(content);
+        if (parsed?.frontmatter) {
+          parsed.frontmatter.title = newName.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+          const yamlStr = yaml.dump(parsed.frontmatter, { sortKeys: true, lineWidth: -1 });
+          const newContent = `---\n${yamlStr}---\n\n${parsed.body}`;
+          await fs.writeFile(newFullPath, newContent, 'utf-8');
+        }
+      } catch {
+        // Non-critical, continue even if frontmatter update fails
+      }
+
+      // Update wikilinks in other notes
+      let linksUpdated = 0;
+      if (shouldUpdateLinks) {
+        const backlinks = await findBacklinks(VAULT_KMW_PATH, oldName);
+
+        for (const backlink of backlinks) {
+          const backlinkPath = path.join(VAULT_KMW_PATH, backlink.file);
+          if (backlinkPath === newFullPath) continue; // Skip the renamed file itself
+
+          const updated = await updateWikilinksInFile(backlinkPath, oldName, newName);
+          if (updated) linksUpdated++;
+        }
+      }
+
+      // Invalidate cache
+      invalidateCache();
+
+      let responseText = `Renamed: ${notePath} → ${newRelativePath}`;
+      if (shouldUpdateLinks) {
+        responseText += `\nUpdated ${linksUpdated} file(s) with wikilinks to this note.`;
+      }
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: responseText,
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error renaming note: ${error instanceof Error ? error.message : "Unknown error"}`,
+        }],
+        isError: true,
+      };
+    }
+  }
+);
+
 // Tool: move_note
 server.tool(
   "move_note",
-  "Move a note to a different folder within the vault",
+  "Move a note to a different folder within the vault. Can optionally update wikilinks in other notes that reference this note.",
   {
     source: z.string().min(1).describe("Current relative path to the note"),
     destination: z.string().min(1).describe("Destination folder (e.g., 'Customers/Gartner/Technical' or 'Archive')"),
-    updateLinks: z.boolean().optional().describe("Update wikilinks in other notes (default: true) - NOT YET IMPLEMENTED"),
+    updateLinks: z.boolean().optional().describe("Update wikilinks in other notes to reflect the new location (default: false)"),
   },
-  async ({ source, destination }) => {
+  async ({ source, destination, updateLinks }) => {
     try {
       const sourcePath = path.join(VAULT_KMW_PATH, source);
       const fileName = path.basename(source);
       const destFolder = path.join(VAULT_KMW_PATH, destination);
       const destPath = path.join(destFolder, fileName);
+      const noteName = getNoteNameFromPath(source);
 
       // Validate source path stays within vault
       if (!isPathWithinVault(sourcePath)) {
@@ -1543,10 +2271,51 @@ server.tool(
       // Move the file
       await fs.rename(sourcePath, destPath);
 
+      // Update wikilinks if requested
+      let linksUpdated = 0;
+      if (updateLinks) {
+        // Find all notes that link to the moved note
+        const backlinks = await findBacklinks(VAULT_KMW_PATH, noteName);
+
+        // Update links in each file (the note name stays the same, just location changes)
+        // For Obsidian, simple [[notename]] links still work after move
+        // But if notes use full paths like [[folder/notename]], we need to update them
+        const oldPathPrefix = path.dirname(source);
+        const newPathPrefix = destination;
+
+        for (const backlink of backlinks) {
+          const backlinkPath = path.join(VAULT_KMW_PATH, backlink.file);
+          try {
+            const content = await fs.readFile(backlinkPath, 'utf-8');
+            // Update full path links like [[OldFolder/notename]] to [[NewFolder/notename]]
+            const oldFullPath = oldPathPrefix !== '.' ? `${oldPathPrefix}/${noteName}` : noteName;
+            const newFullPath = `${newPathPrefix}/${noteName}`;
+
+            if (content.includes(`[[${oldFullPath}]]`) || content.includes(`[[${oldFullPath}|`)) {
+              const updatedContent = content
+                .replace(new RegExp(`\\[\\[${oldFullPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\]\\]`, 'g'), `[[${newFullPath}]]`)
+                .replace(new RegExp(`\\[\\[${oldFullPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\|`, 'g'), `[[${newFullPath}|`);
+              await fs.writeFile(backlinkPath, updatedContent, 'utf-8');
+              linksUpdated++;
+            }
+          } catch {
+            // Skip files that can't be updated
+          }
+        }
+      }
+
+      // Invalidate cache since vault structure changed
+      invalidateCache();
+
+      let responseText = `Moved: ${source} → ${destination}/${fileName}`;
+      if (updateLinks) {
+        responseText += `\nUpdated ${linksUpdated} file(s) with path-based wikilinks.`;
+      }
+
       return {
         content: [{
           type: "text" as const,
-          text: `Moved: ${source} → ${destination}/${fileName}`,
+          text: responseText,
         }]
       };
     } catch (error) {
@@ -1582,6 +2351,9 @@ export {
   inferMetadataFromPath,
   inferTagsFromContent,
   mergeFrontmatter,
+  getTimeAgo,
+  getNoteNameFromPath,
+  extractWikilinks,
 };
 
 export type { TodoItem, InferredMetadata, VaultStats };
